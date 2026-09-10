@@ -3,7 +3,6 @@ use pumpkin_plugin_api::{
     Server,
     command::{CommandError, CommandSender, ConsumedArgs},
     commands::CommandHandler,
-    text::TextComponent,
 };
 use std::sync::Arc;
 
@@ -21,16 +20,17 @@ impl CommandHandler for LeaveCommandExecutor {
         let player = match sender.as_player() {
             Some(p) => p,
             None => {
-                return Err(CommandError::CommandFailed(TextComponent::text(
-                    "Only players can leave groups.",
+                return Err(CommandError::CommandFailed(crate::i18n::tr(
+                    crate::i18n::DEFAULT_LOCALE,
+                    "command.leave.only_player",
                 )));
             }
         };
 
+        let locale = player.get_locale();
+
         if !player.has_permission("pumpkin_voice:groups") {
-            sender.send_message(TextComponent::text(
-                "You do not have permission to use voice groups.",
-            ));
+            sender.send_message(crate::i18n::tr(&locale, "command.join.no_permission"));
             return Ok(1);
         }
 
@@ -75,7 +75,7 @@ impl CommandHandler for LeaveCommandExecutor {
             }
         }
 
-        sender.send_message(TextComponent::text("Left group"));
+        sender.send_message(crate::i18n::tr(&locale, "command.leave.left"));
 
         Ok(1)
     }

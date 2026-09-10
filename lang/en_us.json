@@ -1,0 +1,15 @@
+{
+  "command.join.only_player": "Only players can join groups.",
+  "command.join.no_permission": "You do not have permission to use voice groups.",
+  "command.join.group_not_found": "Group does not exist",
+  "command.join.missing_password": "Missing password",
+  "command.join.incorrect_password": "Incorrect password",
+  "command.join.joined": "Joined group %s",
+  "command.leave.only_player": "Only players can leave groups.",
+  "command.leave.left": "Left group",
+  "command.invite.only_player": "Only players can invite to groups.",
+  "command.invite.not_in_group": "You are not in a group",
+  "command.invite.sent": "Invited player(s)",
+  "command.invite.message": "%s invited you to group '%s'. Type: /voicechat join %s%s",
+  "kick.voice_chat_required": "You must have the Simple Voice Chat mod installed to play on this server!"
+}

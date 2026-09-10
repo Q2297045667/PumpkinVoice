@@ -8,7 +8,6 @@ use pumpkin_plugin_api::{
     events::{EventData, EventHandler, PlayerJoinEvent},
     player::{BedrockDisconnectReason, BedrockKickOptions, JavaKickOptions},
     scheduler::SchedulerExt,
-    text::TextComponent,
 };
 use std::sync::Arc;
 
@@ -76,15 +75,17 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
                     && state.socket_addr.is_none()
                     && let Some(p) = server.get_player_by_uuid(player_id)
                 {
-                    const REASON: &str =
-                        "You must have the Simple Voice Chat mod installed to play on this server!";
+                    const REASON_KEY: &str = "kick.voice_chat_required";
+                    let locale = p.get_locale();
 
                     if let Some(java_player) = p.as_java() {
-                        java_player.kick(JavaKickOptions::new(TextComponent::text(REASON)));
+                        java_player
+                            .kick(JavaKickOptions::new(crate::i18n::tr(&locale, REASON_KEY)));
                     } else if let Some(bedrock_player) = p.as_bedrock() {
+                        let reason = crate::i18n::translate_str(&locale, REASON_KEY);
                         bedrock_player.kick(&BedrockKickOptions::new(
                             BedrockDisconnectReason::Kicked,
-                            REASON,
+                            reason.as_str(),
                         ));
                     }
                 }

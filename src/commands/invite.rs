@@ -27,15 +27,19 @@ impl CommandHandler for InviteCommandExecutor {
         let source_player = match sender.as_player() {
             Some(p) => p,
             None => {
-                return Err(CommandError::CommandFailed(TextComponent::text(
-                    "Only players can invite to groups.",
+                return Err(CommandError::CommandFailed(crate::i18n::tr(
+                    crate::i18n::DEFAULT_LOCALE,
+                    "command.invite.only_player",
                 )));
             }
         };
 
+        let source_locale = source_player.get_locale();
+
         if !source_player.has_permission("pumpkin_voice:groups") {
-            sender.send_message(TextComponent::text(
-                "You do not have permission to use voice groups.",
+            sender.send_message(crate::i18n::tr(
+                &source_locale,
+                "command.join.no_permission",
             ));
             return Ok(1);
         }
@@ -52,21 +56,29 @@ impl CommandHandler for InviteCommandExecutor {
                         .unwrap_or_default();
 
                     for target_player in players {
+                        // The invite text is resolved in the *target's* locale.
+                        let target_locale = target_player.get_locale();
                         target_player.send_system_message(
-                            TextComponent::text(&format!(
-                                "{} invited you to group '{}'. Type: /voicechat join {}{}",
-                                source_player.get_name(),
-                                group.name,
-                                group.id,
-                                pwd_suffix
-                            )),
+                            crate::i18n::tr_with(
+                                &target_locale,
+                                "command.invite.message",
+                                vec![
+                                    TextComponent::text(&source_player.get_name()),
+                                    TextComponent::text(&group.name),
+                                    TextComponent::text(&group.id.to_string()),
+                                    TextComponent::text(&pwd_suffix),
+                                ],
+                            ),
                             false,
                         );
                     }
-                    sender.send_message(TextComponent::text("Invited player(s)"));
+                    sender.send_message(crate::i18n::tr(&source_locale, "command.invite.sent"));
                 }
             } else {
-                sender.send_message(TextComponent::text("You are not in a group"));
+                sender.send_message(crate::i18n::tr(
+                    &source_locale,
+                    "command.invite.not_in_group",
+                ));
             }
         }
 

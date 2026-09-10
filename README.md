@@ -173,6 +173,7 @@ Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-vo
 | `spectator_interaction` (basic — see partial list) | ✅ |
 | `allow_recording`, `codec`, `mtu_size`, `voice_host` passthrough to clients | ✅ |
 | Permission nodes (`speak` / `listen` / `groups`) enforced on the audio path | ✅ (renamed `pumpkin_voice:*`) |
+| Localized player-facing messages | ✅ via Pumpkin's host i18n — `en_us` + `zh_cn` built in, data-folder overrides (see [Translations](#translations)) |
 | Packet rate limiting | ✅ (ours limits UDP; upstream limits the plugin-message channel) |
 | Bedrock clients (kicked under `force_voice_chat`, skipped for Java payloads) | ➕ beyond upstream |
 
@@ -213,12 +214,62 @@ Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-vo
 - The addon/plugin API (`VoicechatServerApi`): 38 event types, audio channels (`Static` / `Locational` / `Entity`), `AudioPlayer`, Opus encoder/decoder, MP3, custom sockets, raw UDP packet interception
 - Proxy forwarding (Velocity / BungeeCord / Waterfall companion plugins)
 - PlaceholderAPI placeholders and ViaVersion compatibility layer
-- Translations — messages are English-only; upstream ships localized message bundles
+- Translated command *descriptions* (the Pumpkin API does not translate command-tree descriptions yet — messages are translated, descriptions stay English)
 - `use_natives` / `threaded_server_support` config options (not portable to WASM/Pumpkin — intentionally omitted)
 
 ### Client-side features (out of scope for the server)
 
 Push-to-talk, voice activation, automatic voice-activity detection, automatic microphone gain, RNNoise noise suppression, OpenAL output, Opus encoding/decoding, microphone & speaker test playback, configurable PTT key, individual player volume adjustment, microphone amplification, 3D sound, HUD icons, the group UI, and the recording UI all live in the client mod. They work against this server as long as the protocol above stays compatible.
+
+---
+
+## Translations
+
+The plugin uses **Pumpkin's own translation system** (the `i18n` host interface) instead of rolling its own:
+
+1. On load, the plugin registers flat JSON language maps under the `pumpkin_voice` namespace with the host (`i18n.load-translations`).
+2. Every player-facing message is built as a `TextComponent::custom("pumpkin_voice", key, locale, args)` component, where `locale` comes from `player.get_locale()` (the client's language setting).
+3. The **host** resolves `pumpkin_voice:<key>` for that locale when the text is serialized, substituting `%s` placeholders with the argument components. Missing translations fall back to `en_us`, then to the raw key — an incomplete language file can never break a message.
+
+### Built-in languages
+
+| Locale | File |
+| ------ | ---- |
+| `en_us` (fallback) | `lang/en_us.json` |
+| `zh_cn` | `lang/zh_cn.json` |
+
+### Adding or overriding languages at runtime
+
+Server admins can add a language or override any built-in string without recompiling: drop a `lang/<locale>.json` file into the plugin data folder (e.g. `plugins/data/pumpkin_voice/lang/de_de.json`) and reload the plugin. Data-folder files are loaded after the embedded ones, so they win.
+
+```json
+{
+  "command.join.joined": "Gruppe %s beigetreten",
+  "kick.voice_chat_required": "Du musst den Simple Voice Chat Mod installiert haben!"
+}
+```
+
+To ship a new language **built in**, add `lang/<locale>.json` next to the crate root and extend the `locale_from_str` match in `src/i18n.rs` (only locales that carry files need listing — everything else falls back to English host-side anyway).
+
+### Translation keys
+
+| Key | Message |
+| --- | ------- |
+| `command.join.only_player` | "Only players can join groups." |
+| `command.join.no_permission` | "You do not have permission to use voice groups." |
+| `command.join.group_not_found` | "Group does not exist" |
+| `command.join.missing_password` | "Missing password" |
+| `command.join.incorrect_password` | "Incorrect password" |
+| `command.join.joined` | "Joined group %s" |
+| `command.leave.only_player` | "Only players can leave groups." |
+| `command.leave.left` | "Left group" |
+| `command.invite.only_player` | "Only players can invite to groups." |
+| `command.invite.not_in_group` | "You are not in a group" |
+| `command.invite.sent` | "Invited player(s)" |
+| `command.invite.message` | "%s invited you to group '%s'. Type: /voicechat join %s%s" |
+| `kick.voice_chat_required` | "You must have the Simple Voice Chat mod installed to play on this server!" |
+
+Console feedback (no client locale) always uses `en_us`. The `/voicechat` command *description* stays English because the Pumpkin API does not translate command-tree descriptions yet.
 
 ---
 

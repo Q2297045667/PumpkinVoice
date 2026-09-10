@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod config;
 pub mod handlers;
+pub mod i18n;
 pub mod net;
 pub mod state;
 pub mod util;
@@ -79,6 +80,9 @@ impl Plugin for VoiceChatPlugin {
 
         // Initialize config
         crate::config::VoicechatConfig::init(&context.get_data_folder());
+
+        // Register translations with the Pumpkin host (embedded + overrides)
+        crate::i18n::init(&context.get_data_folder());
 
         let state_manager = self.state_manager.clone();
 

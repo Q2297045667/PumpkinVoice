@@ -13,6 +13,7 @@ pub struct CategoryConfig {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VoicechatConfig {
+    pub language: String,
     pub port: i32,
     pub bind_address: String,
     pub max_voice_distance: f64,
@@ -36,6 +37,7 @@ pub struct VoicechatConfig {
 impl Default for VoicechatConfig {
     fn default() -> Self {
         Self {
+            language: "en_us".to_string(),
             port: 24454,
             bind_address: String::new(),
             max_voice_distance: 48.0,
@@ -63,6 +65,7 @@ impl Default for VoicechatConfig {
 }
 
 pub static CONFIG: RwLock<VoicechatConfig> = RwLock::new(VoicechatConfig {
+    language: "en_us".to_string(),
     port: 24454,
     bind_address: String::new(),
     max_voice_distance: 48.0,

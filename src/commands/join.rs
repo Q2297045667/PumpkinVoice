@@ -37,16 +37,17 @@ impl CommandHandler for JoinCommandExecutor {
         let player = match sender.as_player() {
             Some(p) => p,
             None => {
-                return Err(CommandError::CommandFailed(TextComponent::text(
-                    "Only players can join groups.",
+                return Err(CommandError::CommandFailed(crate::i18n::tr(
+                    crate::i18n::DEFAULT_LOCALE,
+                    "command.join.only_player",
                 )));
             }
         };
 
+        let locale = player.get_locale();
+
         if !player.has_permission("pumpkin_voice:groups") {
-            sender.send_message(TextComponent::text(
-                "You do not have permission to use voice groups.",
-            ));
+            sender.send_message(crate::i18n::tr(&locale, "command.join.no_permission"));
             return Ok(1);
         }
 
@@ -103,7 +104,11 @@ impl CommandHandler for JoinCommandExecutor {
                     }
                 }
 
-                sender.send_message(TextComponent::text(&format!("Joined group {}", group_name)));
+                sender.send_message(crate::i18n::tr_with(
+                    &locale,
+                    "command.join.joined",
+                    vec![TextComponent::text(&group_name)],
+                ));
             } else {
                 let joined_packet = crate::net::JoinedGroupPacket {
                     group: None,
@@ -114,15 +119,15 @@ impl CommandHandler for JoinCommandExecutor {
                         .send_custom_payload("voicechat:joined_group", &joined_packet.to_bytes());
                 }
 
-                let error_msg = if password.is_none() {
-                    "Missing password"
+                let error_key = if password.is_none() {
+                    "command.join.missing_password"
                 } else {
-                    "Incorrect password"
+                    "command.join.incorrect_password"
                 };
-                sender.send_message(TextComponent::text(error_msg));
+                sender.send_message(crate::i18n::tr(&locale, error_key));
             }
         } else {
-            sender.send_message(TextComponent::text("Group does not exist"));
+            sender.send_message(crate::i18n::tr(&locale, "command.join.group_not_found"));
         }
 
         Ok(1)
