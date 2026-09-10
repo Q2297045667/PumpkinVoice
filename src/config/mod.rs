@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 use tracing::debug;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -64,26 +64,28 @@ impl Default for VoicechatConfig {
     }
 }
 
-pub static CONFIG: RwLock<VoicechatConfig> = RwLock::new(VoicechatConfig {
-    language: "en_us".to_string(),
-    port: 24454,
-    bind_address: String::new(),
-    max_voice_distance: 48.0,
-    whisper_distance: 24.0,
-    codec: String::new(), // Still empty as it's just a static placeholder
-    mtu_size: 1024,
-    keep_alive: 1000,
-    enable_groups: true,
-    voice_host: String::new(),
-    allow_recording: true,
-    spectator_interaction: false,
-    spectator_player_possession: false,
-    force_voice_chat: false,
-    login_timeout: 10000,
-    broadcast_range: -1.0,
-    allow_pings: true,
-    max_packets_per_second: 500,
-    categories: Vec::new(),
+pub static CONFIG: LazyLock<RwLock<VoicechatConfig>> = LazyLock::new(|| {
+    RwLock::new(VoicechatConfig {
+        language: "en_us".to_string(),
+        port: 24454,
+        bind_address: String::new(),
+        max_voice_distance: 48.0,
+        whisper_distance: 24.0,
+        codec: String::new(),
+        mtu_size: 1024,
+        keep_alive: 1000,
+        enable_groups: true,
+        voice_host: String::new(),
+        allow_recording: true,
+        spectator_interaction: false,
+        spectator_player_possession: false,
+        force_voice_chat: false,
+        login_timeout: 10000,
+        broadcast_range: -1.0,
+        allow_pings: true,
+        max_packets_per_second: 500,
+        categories: Vec::new(),
+    })
 });
 
 impl VoicechatConfig {

@@ -21,7 +21,7 @@ impl CommandHandler for LeaveCommandExecutor {
             Some(p) => p,
             None => {
                 return Err(CommandError::CommandFailed(crate::i18n::tr(
-                    crate::i18n::DEFAULT_LOCALE,
+                    crate::i18n::default_locale(),
                     "command.leave.only_player",
                 )));
             }
