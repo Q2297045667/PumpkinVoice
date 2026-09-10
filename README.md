@@ -15,11 +15,23 @@ This plugin implements the backend compatibility needed to host the [Simple Voic
 
 ## Tech Stack
 
-- **Language**: Rust
-- **Framework**: `pumpkin-api` (PumpkinMC Plugin SDK)
-- **Async Runtime**: `tokio` (Powers the real-time UDP connection network)
-- **Cryptography**: `aes-gcm` suite for packet serialization matching JVM mod signatures
+- **Language**: Rust (edition 2024), compiled to a `wasm32-wasip2` WebAssembly component
+- **Framework**: [`pumpkin-plugin-api`](https://github.com/Pumpkin-MC/Pumpkin) (PumpkinMC Plugin SDK)
+- **Plugin Interface**: the `pumpkin:plugin@0.1.0` WIT world from [`pumpkin-plugin-wit`](https://github.com/Pumpkin-MC/pumpkin-plugin-wit)
+- **Networking**: non-blocking `std::net::UdpSocket` driven by the host scheduler (no async runtime inside the WASI sandbox)
+- **Cryptography**: `aes-gcm` (AES-128-GCM) suite for packet serialization matching JVM mod signatures
 - **Configuration**: `serde` / `toml`
+
+### Current Dependency / API Pins
+
+| Component | Pinned version |
+| --------- | -------------- |
+| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `7f369c4b5e43029cbc2fff36f59916faf00912f1` |
+| WIT interface | `pumpkin:plugin@0.1.0` (`pumpkin-plugin-wit` rev `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`) |
+| WASM target | `wasm32-wasip2` |
+| Crypto / support crates | `aes-gcm` 0.11, `rand` 0.10, `uuid` 1.26, `bytes` 1.12, `serde` 1.0, `toml` 1.1, `tracing` 0.1 |
+
+The API revision is pin-for-pin the Pumpkin `master` tip whose `pumpkin-plugin-wit` submodule sits at the same commit as the WIT repository `master` branch, so the bindings this plugin exports always match the interface the host expects. `wit-bindgen` is **not** a direct dependency here: the SDK crate owns the `wit_bindgen::generate!` / `export!` component glue.
 
 ---
 
@@ -61,6 +73,12 @@ If you prefer to compile the plugin yourself or are contributing to development:
    Compile the plugin to a WASM component:
    ```bash
    cargo build --release --target wasm32-wasip2
+   ```
+
+4. **Run the Unit Tests** (optional)
+   The test binary is a WASM component that imports the Pumpkin host interfaces, so it cannot be instantiated by a bare `wasmtime`. Run the pure-Rust logic tests on the host target instead:
+   ```bash
+   cargo test --target x86_64-unknown-linux-gnu
    ```
 
 4. **Deploy the Executable**
@@ -124,7 +142,7 @@ src/
 
 ### Deep Permission Integration
 
-The plugin registers native permission nodes via `pumpkin_util::permission::Permission`. Adjust these directly inside your primary Pumpkin engine deployment!
+The plugin registers native permission nodes via `pumpkin_plugin_api::permission::Permission`. Adjust these directly inside your primary Pumpkin engine deployment!
 
 - `pumpkin_voice:command.voicechat`: Required to view the commands layout inside chat.
 - `pumpkin_voice:speak`: Prevents sending encrypted UDP `MicPackets` outbound.
@@ -189,5 +207,5 @@ description = "Global broadcast"
 
 ### Config Write Errors (WASI)
 **Error:** `Failed to create config folder ... (os error 44)` or `Operation not permitted`.
-**Solution:** This typically indicates a permission or preopen mismatch in the WASI environment. Ensure the plugin has `fs.read` and `fs.write` permissions in its metadata (default in recent versions). The plugin now uses absolute-style relative paths to ensure compatibility with Pumpkin's virtual filesystem.
+**Solution:** This typically indicates a permission or preopen mismatch in the WASI environment. Ensure the plugin metadata requests `fs.read.data` and `fs.write.data` (default in recent versions). The plugin now uses absolute-style relative paths to ensure compatibility with Pumpkin's virtual filesystem.
 

@@ -5,8 +5,8 @@ use crate::state::{Group, StateManager};
 use crate::util::buf_ext::BufExt;
 use bytes::Buf;
 use pumpkin_plugin_api::{
+    Server,
     events::{EventData, EventHandler, PlayerCustomPayloadEvent},
-    server::Server,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -26,7 +26,7 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
         let data = &event.data;
         let all_clients = server.get_all_players();
         let state_manager = self.state_manager.clone();
-        let config = crate::config::CONFIG.read().unwrap();
+        let groups_enabled = crate::config::CONFIG.read().unwrap().enable_groups;
 
         let uuid = crate::util::wit_uuid_to_uuid(player.get_id());
 
@@ -109,7 +109,7 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
                 }
             }
         } else if channel == "voicechat:create_group" {
-            if !config.enable_groups {
+            if !groups_enabled {
                 return event;
             }
             let mut cursor = std::io::Cursor::new(data);

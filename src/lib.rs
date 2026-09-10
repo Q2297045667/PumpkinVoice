@@ -15,18 +15,18 @@ use pumpkin_plugin_api::{
     permissions, register_plugin,
     scheduler::SchedulerExt,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub struct VoiceChatPlugin {
     state_manager: Arc<StateManager>,
-    udp_server: Option<Arc<UdpServer>>,
+    udp_server: OnceLock<Arc<UdpServer>>,
 }
 
 impl Plugin for VoiceChatPlugin {
     fn new() -> Self {
         Self {
             state_manager: Arc::new(StateManager::new()),
-            udp_server: None,
+            udp_server: OnceLock::new(),
         }
     }
 
@@ -42,13 +42,13 @@ impl Plugin for VoiceChatPlugin {
                 permissions::NETWORK_UDP_CONNECT.into(),
                 permissions::NETWORK_UDP_OUTGOING_DATAGRAM.into(),
                 permissions::NETWORK_OUTBOUND.into(),
-                permissions::FS_READ.into(),
-                permissions::FS_WRITE.into(),
+                permissions::FS_READ_DATA.into(),
+                permissions::FS_WRITE_DATA.into(),
             ],
         }
     }
 
-    fn on_load(&mut self, context: Context) -> pumpkin_plugin_api::Result<()> {
+    fn on_load(&self, context: Context) -> pumpkin_plugin_api::Result<()> {
         tracing::info!("Simple Voice Chat for PumpkinMC loading...");
 
         // Register permissions
@@ -107,7 +107,9 @@ impl Plugin for VoiceChatPlugin {
             true,
         )?;
 
-        let config = crate::config::CONFIG.read().unwrap();
+        // Host API calls may synchronously re-enter the plugin. Keep the configuration
+        // lock out of those calls by taking an owned snapshot first.
+        let config = crate::config::CONFIG.read().unwrap().clone();
 
         // Initialize UDP Server
         let port = if config.port == -1 {
@@ -127,7 +129,9 @@ impl Plugin for VoiceChatPlugin {
         match UdpServer::new(state_manager.clone(), &server_addr) {
             Ok(udp) => {
                 let udp_arc = Arc::new(udp);
-                self.udp_server = Some(udp_arc.clone());
+                self.udp_server
+                    .set(udp_arc.clone())
+                    .map_err(|_| "voice chat UDP server was already initialized".to_string())?;
 
                 let udp_poll = udp_arc.clone();
                 context.schedule_repeating_task(0, 1, move |server| {

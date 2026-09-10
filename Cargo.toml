@@ -1,6 +1,6 @@
 [package]
 name = "pumpkin_voice"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 authors = ["hmdnnrmn"]
 description = "Simple Voice Chat integration for PumpkinMC"
@@ -10,26 +10,27 @@ license = "GPL-3.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin.git", branch = "master", package = "pumpkin-plugin-api" }
-# We need this for WASM component generation
-wit-bindgen = "0.57"
+# Pumpkin plugin SDK. Pinned to the master revision that carries the
+# `pumpkin:plugin@0.1.0` WIT world (pumpkin-plugin-wit @ 1ad73fff).
+# The API crate owns the `wit-bindgen::generate!` + `export!` component glue,
+# so this crate does not need a direct wit-bindgen dependency.
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin.git", rev = "7f369c4b5e43029cbc2fff36f59916faf00912f1", package = "pumpkin-plugin-api" }
 
 # WASM compatible logging
 tracing = "0.1"
 
 # Crypto - need to ensure these are WASM compatible
 # aes-gcm might need 'aes' and 'ghash' features or similar
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
-rand = { version = "0.8", features = ["small_rng"] }
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+rand = "0.10.2"
 
 # UUID
-uuid = { version = "1.10", features = ["v4", "serde"] }
+uuid = { version = "1.26", features = ["v4", "serde"] }
 
 # Bytes
-bytes = "1.7"
-byteorder = "1.5"
+bytes = "1.12"
 serde = { version = "1.0", features = ["derive"] }
-toml = "1.0"
+toml = "1.1"
 
 [profile.release] 
 lto = true

@@ -1,9 +1,9 @@
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
+    Server,
     command::{CommandError, CommandSender, ConsumedArgs},
     command_wit::Arg,
     commands::CommandHandler,
-    server::Server,
     text::TextComponent,
 };
 use std::sync::Arc;

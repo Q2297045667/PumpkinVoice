@@ -1,8 +1,8 @@
 use crate::net::custom_payloads::{PlayerStatePacket, RemoveGroupPacket};
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
+    Server,
     events::{EventData, EventHandler, PlayerLeaveEvent},
-    server::Server,
 };
 use std::sync::Arc;
 use tracing::info;

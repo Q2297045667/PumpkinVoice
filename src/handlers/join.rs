@@ -4,9 +4,10 @@ use crate::net::custom_payloads::{
 };
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
+    Server,
     events::{EventData, EventHandler, PlayerJoinEvent},
+    player::{BedrockDisconnectReason, BedrockKickOptions, JavaKickOptions},
     scheduler::SchedulerExt,
-    server::Server,
     text::TextComponent,
 };
 use std::sync::Arc;
@@ -27,7 +28,8 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
         let name = player.get_name();
 
         let state_manager = self.state_manager.clone();
-        let config = crate::config::CONFIG.read().unwrap();
+        // Sending payloads can synchronously re-enter the plugin on the current API.
+        let config = crate::config::CONFIG.read().unwrap().clone();
 
         // Add player to state manager and generate secret
         let secret = state_manager.add_player_sync(uuid, name);
@@ -74,10 +76,17 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
                     && state.socket_addr.is_none()
                     && let Some(p) = server.get_player_by_uuid(player_id)
                 {
-                    let text = TextComponent::text(
-                        "You must have the Simple Voice Chat mod installed to play on this server!",
-                    );
-                    p.kick(text);
+                    const REASON: &str =
+                        "You must have the Simple Voice Chat mod installed to play on this server!";
+
+                    if let Some(java_player) = p.as_java() {
+                        java_player.kick(JavaKickOptions::new(TextComponent::text(REASON)));
+                    } else if let Some(bedrock_player) = p.as_bedrock() {
+                        bedrock_player.kick(&BedrockKickOptions::new(
+                            BedrockDisconnectReason::Kicked,
+                            REASON,
+                        ));
+                    }
                 }
             });
         }

@@ -9,7 +9,7 @@ use crate::net::voice_packets::{
 };
 use crate::state::StateManager;
 use crate::util::buf_ext::BufExt;
-use pumpkin_plugin_api::server::Server;
+use pumpkin_plugin_api::Server;
 
 pub struct UdpServer {
     state_manager: Arc<StateManager>,
@@ -70,7 +70,24 @@ impl UdpServer {
     }
 
     fn handle_packet(&self, server: &Server, data: &[u8], src: std::net::SocketAddr) {
-        let config = crate::config::CONFIG.read().unwrap();
+        // Snapshot only the hot-path values needed below. Server/player host calls may
+        // synchronously re-enter the plugin, so no configuration lock can span them.
+        let (
+            spectator_interaction,
+            whisper_distance,
+            max_voice_distance,
+            broadcast_range,
+            allow_pings,
+        ) = {
+            let config = crate::config::CONFIG.read().unwrap();
+            (
+                config.spectator_interaction,
+                config.whisper_distance,
+                config.max_voice_distance,
+                config.broadcast_range,
+                config.allow_pings,
+            )
+        };
         if data.len() < 17 {
             return;
         }
@@ -146,7 +163,7 @@ impl UdpServer {
                                 sender_pl.get_gamemode(),
                                 pumpkin_plugin_api::common::GameMode::Spectator
                             );
-                            if is_spectator && !config.spectator_interaction {
+                            if is_spectator && !spectator_interaction {
                                 return;
                             }
 
@@ -186,15 +203,15 @@ impl UdpServer {
                             } else {
                                 let pos_a = sender_pl.get_position();
                                 let distance_config = if mic_packet.whispering {
-                                    config.whisper_distance
+                                    whisper_distance
                                 } else {
-                                    config.max_voice_distance
+                                    max_voice_distance
                                 };
 
-                                let broadcast_range = if config.broadcast_range < 0.0 {
-                                    config.max_voice_distance + 1.0
+                                let broadcast_range = if broadcast_range < 0.0 {
+                                    max_voice_distance + 1.0
                                 } else {
-                                    config.broadcast_range
+                                    broadcast_range
                                 }
                                 .max(distance_config);
 
@@ -265,7 +282,7 @@ impl UdpServer {
                             }
                         }
                         0x7 => {
-                            if config.allow_pings {
+                            if allow_pings {
                                 let _ = send_packet(
                                     &self.socket,
                                     src,
