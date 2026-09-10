@@ -273,7 +273,10 @@ mod tests {
     fn embedded_language_files_are_valid_and_non_empty() {
         // The host parses these with `unwrap_or_default`, so a broken file
         // would silently register zero translations.
-        assert!(!EMBEDDED_LANGS.is_empty(), "no embedded language files found");
+        assert!(
+            !EMBEDDED_LANGS.is_empty(),
+            "no embedded language files found"
+        );
         for (locale, json) in EMBEDDED_LANGS {
             let map = parse(json);
             assert!(!map.is_empty(), "{locale} contains no translations");
