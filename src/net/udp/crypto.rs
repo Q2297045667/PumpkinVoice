@@ -28,11 +28,18 @@ pub fn send_packet(
         Ok(enc) => enc,
         Err(e) => {
             tracing::error!(
-                "Encryption error for packet type {}: {}",
-                packet.get_type_id(),
-                e
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.udp.encrypt_failed",
+                    &[packet.get_type_id().to_string(), e.to_string()],
+                )
             );
-            return Err("Encryption error".into());
+            return Err(crate::i18n::translate_str(
+                crate::i18n::default_locale(),
+                "error.udp.encryption",
+            )
+            .into());
         }
     };
 
@@ -42,7 +49,14 @@ pub fn send_packet(
     final_buf.put_slice(&encrypted);
 
     if let Err(e) = socket.send_to(&final_buf, target) {
-        tracing::error!("Failed to send UDP packet to {}: {}", target, e);
+        tracing::error!(
+            "{}",
+            crate::i18n::translate_str_with(
+                crate::i18n::default_locale(),
+                "log.udp.send_failed",
+                &[target.to_string(), e.to_string()],
+            )
+        );
         return Err(e.into());
     }
     Ok(())

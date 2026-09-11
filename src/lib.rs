@@ -36,7 +36,12 @@ impl Plugin for VoiceChatPlugin {
             name: "pumpkin_voice".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             authors: vec!["hmdnnrmn".into()],
-            description: "Simple Voice Chat integration for PumpkinMC".into(),
+            // Metadata is requested before Pumpkin gives the plugin its data
+            // folder, so this uses the embedded fallback catalog.
+            description: crate::i18n::translate_str(
+                crate::i18n::FALLBACK_LOCALE,
+                "plugin.description",
+            ),
             dependencies: vec![],
             permissions: vec![
                 permissions::NETWORK_UDP_BIND.into(),
@@ -50,39 +55,48 @@ impl Plugin for VoiceChatPlugin {
     }
 
     fn on_load(&self, context: Context) -> pumpkin_plugin_api::Result<()> {
-        tracing::info!("Simple Voice Chat for PumpkinMC loading...");
+        // Initialize config before registration-time strings are resolved.
+        crate::config::VoicechatConfig::init(&context.get_data_folder());
+
+        // Load translations from the embedded registry and data-folder
+        // overrides, then use the configured server language below.
+        crate::i18n::init(&context.get_data_folder());
+        let locale = crate::i18n::default_locale();
+
+        tracing::info!("{}", crate::i18n::translate_str(locale, "plugin.loading"));
+
+        if !context.get_server().is_online_mode() {
+            tracing::warn!(
+                "{}",
+                crate::i18n::translate_str(locale, "log.security.offline_mode")
+            );
+        }
 
         // Register permissions
         let _ = context.register_permission(&pumpkin_plugin_api::permission::Permission {
             node: "pumpkin_voice:speak".into(),
-            description: "Allows the player to speak in voice chat".into(),
+            description: crate::i18n::translate_str(locale, "permission.speak.description"),
             default: pumpkin_plugin_api::permission::PermissionDefault::Allow,
             children: vec![],
         });
         let _ = context.register_permission(&pumpkin_plugin_api::permission::Permission {
             node: "pumpkin_voice:listen".into(),
-            description: "Allows the player to listen to voice chat".into(),
+            description: crate::i18n::translate_str(locale, "permission.listen.description"),
             default: pumpkin_plugin_api::permission::PermissionDefault::Allow,
             children: vec![],
         });
         let _ = context.register_permission(&pumpkin_plugin_api::permission::Permission {
             node: "pumpkin_voice:command.voicechat".into(),
-            description: "Allows the player to use the /voicechat command".into(),
+            description: crate::i18n::translate_str(locale, "permission.command.description"),
             default: pumpkin_plugin_api::permission::PermissionDefault::Allow,
             children: vec![],
         });
         let _ = context.register_permission(&pumpkin_plugin_api::permission::Permission {
             node: "pumpkin_voice:groups".into(),
-            description: "Allows the player to use voice chat groups".into(),
+            description: crate::i18n::translate_str(locale, "permission.groups.description"),
             default: pumpkin_plugin_api::permission::PermissionDefault::Allow,
             children: vec![],
         });
-
-        // Initialize config
-        crate::config::VoicechatConfig::init(&context.get_data_folder());
-
-        // Register translations with the Pumpkin host (embedded + overrides)
-        crate::i18n::init(&context.get_data_folder());
 
         let state_manager = self.state_manager.clone();
 
@@ -133,9 +147,9 @@ impl Plugin for VoiceChatPlugin {
         match UdpServer::new(state_manager.clone(), &server_addr) {
             Ok(udp) => {
                 let udp_arc = Arc::new(udp);
-                self.udp_server
-                    .set(udp_arc.clone())
-                    .map_err(|_| "voice chat UDP server was already initialized".to_string())?;
+                self.udp_server.set(udp_arc.clone()).map_err(|_| {
+                    crate::i18n::translate_str(locale, "error.udp.already_initialized")
+                })?;
 
                 let udp_poll = udp_arc.clone();
                 context.schedule_repeating_task(0, 1, move |server| {
@@ -147,10 +161,24 @@ impl Plugin for VoiceChatPlugin {
                     udp_ka.send_keep_alives();
                 });
 
-                tracing::info!("Voice chat UDP server listening on {}", server_addr);
+                tracing::info!(
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        locale,
+                        "log.udp.listening",
+                        std::slice::from_ref(&server_addr),
+                    )
+                );
             }
             Err(e) => {
-                tracing::error!("Failed to start UDP server: {}", e);
+                tracing::error!(
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        locale,
+                        "log.udp.start_failed",
+                        &[e.to_string()],
+                    )
+                );
             }
         }
 
@@ -160,7 +188,7 @@ impl Plugin for VoiceChatPlugin {
             "pumpkin_voice:command.voicechat",
         );
 
-        tracing::info!("Simple Voice Chat for PumpkinMC loaded.");
+        tracing::info!("{}", crate::i18n::translate_str(locale, "plugin.loaded"));
         Ok(())
     }
 }

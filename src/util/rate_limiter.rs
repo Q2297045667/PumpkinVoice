@@ -40,10 +40,16 @@ impl PacketRateLimiter {
         let allowed = limiter.try_acquire();
         if !allowed {
             tracing::warn!(
-                "Rate limiting player {}: amount={}, threshold={}",
-                player,
-                limiter.amount,
-                limiter.threshold
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.rate_limit.player",
+                    &[
+                        player.to_string(),
+                        limiter.amount.to_string(),
+                        limiter.threshold.to_string(),
+                    ],
+                )
             );
         }
         allowed
@@ -86,7 +92,14 @@ impl RateLimiter {
             }
         } else if elapsed_ns == 0 && self.amount >= self.threshold {
             // Log once in a while or when stuck
-            tracing::debug!("Rate limiter stuck? elapsed_ns=0, amount={}", self.amount);
+            tracing::debug!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.rate_limit.zero_elapsed",
+                    &[self.amount.to_string()],
+                )
+            );
         }
 
         if self.amount >= self.threshold {

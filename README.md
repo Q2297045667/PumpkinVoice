@@ -26,12 +26,12 @@ This plugin implements the backend compatibility needed to host the [Simple Voic
 
 | Component | Pinned version |
 | --------- | -------------- |
-| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `7f369c4b5e43029cbc2fff36f59916faf00912f1` |
+| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `7806bc25d3b04f134203dc44c273d9445fe39430` (verified 2026-09-11) |
 | WIT interface | `pumpkin:plugin@0.1.0` (`pumpkin-plugin-wit` rev `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`) |
 | WASM target | `wasm32-wasip2` |
 | Crypto / support crates | `aes-gcm` 0.11, `rand` 0.10, `uuid` 1.26, `bytes` 1.12, `serde` 1.0, `toml` 1.1, `tracing` 0.1 |
 
-The API revision is pin-for-pin the Pumpkin `master` tip (also tagged `nightly`) whose `pumpkin-plugin-wit` submodule sits at the same commit as the WIT repository `master` branch, so the bindings this plugin exports always match the interface the host expects. The `pumpkin-plugin-api` release published on crates.io (`0.1.0-dev+26.2-26.45`, cut from the `0.1.0-dev+26.2-26.45` release tag) trails `master` and carries the identical `pumpkin:plugin@0.1.0` WIT, so the git pin above is the newest API available. `wit-bindgen` is **not** a direct dependency here: the SDK crate owns the `wit_bindgen::generate!` / `export!` component glue.
+The API is pinned to the Pumpkin `master` tip verified on 2026-09-11. That Pumpkin revision points its `pumpkin-plugin-wit` submodule at `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`, which is also the current WIT repository `master` tip, so the generated guest bindings match the interface consumed by that server revision. `wit-bindgen` is **not** a direct dependency here: the SDK crate owns the `wit_bindgen::generate!` / `export!` component glue.
 
 ---
 
@@ -153,7 +153,7 @@ The plugin registers native permission nodes via `pumpkin_plugin_api::permission
 
 ## Feature Comparison vs. Upstream Simple Voice Chat
 
-Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-voice-chat) server implementation by henkelmax (`2.6.23` line — Bukkit/Paper plugin plus the shared server core), verified against the [upstream source code](https://github.com/henkelmax/simple-voice-chat). Everything below is **server-side** behavior; client-side features (see the end of this section) ship in the client mod and work as long as this server speaks the protocol.
+Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-voice-chat) server implementation by henkelmax (`2.6.24+26.2` — Bukkit/Paper plugin plus the shared server core), verified against the [upstream `26.2` source branch](https://github.com/henkelmax/simple-voice-chat/tree/26.2). Everything below is **server-side** behavior; client-side features (see the end of this section) ship in the client mod and work as long as this server speaks the protocol.
 
 ### ✅ Implemented (server-side parity)
 
@@ -170,10 +170,15 @@ Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-vo
 | `force_voice_chat` + `login_timeout` kick for unmodded clients | ✅ |
 | `allow_pings` UDP ping echo | ✅ |
 | `ConnectionCheck` / `ConnectionCheckAck` | ✅ |
-| `spectator_interaction` (basic — see partial list) | ✅ |
+| `spectator_interaction` with positional `LocationSoundPacket` audio | ✅ |
+| Group-type routing (`NORMAL` / `OPEN` / `ISOLATED`) | ✅ |
+| Player quit state removal via `voicechat:remove_state` | ✅ |
+| `/voicechat join` by UUID or quoted name, with Pumpkin server-side suggestions | ✅ |
 | `allow_recording`, `codec`, `mtu_size`, `voice_host` passthrough to clients | ✅ |
 | Permission nodes (`speak` / `listen` / `groups`) enforced on the audio path | ✅ (renamed `pumpkin_voice:*`) |
-| Localized player-facing messages | ✅ via Pumpkin's host i18n — `en_us` + `zh_cn` built in, data-folder overrides (see [Translations](#translations)) |
+| Disabled/disconnected receiver filtering | ✅ |
+| Offline-mode encryption identity warning via Pumpkin server API | ✅ |
+| Localized player-facing messages, descriptions, and console logs | ✅ plugin-owned JSON registry — `en_us` + `zh_cn` built in, data-folder additions/overrides (see [Translations](#translations)) |
 | Packet rate limiting | ✅ (ours limits UDP; upstream limits the plugin-message channel) |
 | Bedrock clients (kicked under `force_voice_chat`, skipped for Java payloads) | ➕ beyond upstream |
 
@@ -181,40 +186,31 @@ Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-vo
 
 | Area | Upstream behavior | Current behavior |
 | ---- | ------------------ | ----------------- |
-| Group types (`OPEN` / `ISOLATED` / `OPEN_ISOLATED`) | `OPEN` group members are **also** heard in proximity; receivers in `ISOLATED` groups are excluded from proximity audio | Group type is stored and forwarded, but audio routing ignores it — group members only ever hear group audio, isolated members still hear proximity. Group type is also reset to `NORMAL` when existing groups are synced to joining players |
-| Spectator audio | Spectators speak via `LocationSoundPacket` at their position | Sent as a regular `PlayerSoundPacket` (works, but positions audio on the sender entity) |
 | Persistent groups | Groups flagged persistent survive becoming empty | The flag is honored during empty-group cleanup, but nothing ever creates a persistent group |
-| Secret delivery | Client sends `request_secret`, server replies (re-requestable) | Secret is pushed once on join; no re-request path if the client was not ready |
+| Secret delivery | Client sends `request_secret`; server validates the compatibility version and replies | The initial secret is pushed on join and can now be re-requested; the client compatibility version is logged but not rejected yet |
 | Permission denial feedback | Players get a cooldown-limited "no speak/listen permission" chat message | Silent debug log only |
-| `/voicechat join` | Accepts a group **UUID** (used by invites) or a name, names may be quoted with spaces | Name lookup only — the `/voicechat join <uuid> <password>` command printed by `/voicechat invite` cannot be resolved |
-| Hidden groups | Hidden groups are not listed to clients | Flag exists in the packet, always `false` |
+| Hidden groups | Hidden groups are marked so clients omit them from public listings | State and synchronization preserve the hidden flag, but no current command or API creates hidden groups |
 
 ### ❌ Not implemented (server-side)
 
 **Protocol & robustness**
-- `voicechat:request_secret` handling, including the client compatibility-version check and the "incompatible version" message
-- `voicechat:remove_state` on player quit (we broadcast a disconnected state instead of removing the entry)
+- Client compatibility-version rejection and the "incompatible version" message for `voicechat:request_secret`
 - Keep-alive timeout detection and automatic reconnect (upstream drops clients silent for `10 × keep_alive` and re-issues a fresh secret); the client `KeepAlive` (0x8) response is not tracked
 - TCP plugin-message rate limit (`tcp_rate_limit`, upstream default 16 packets/s)
-- Receiver-side filtering of `disabled` / `disconnected` states before sending audio
 - Vanish / visibility (`canSee`) integration — hidden players are treated like normal players
-- Offline-server-mode warning (upstream logs that encryption is not secure in offline mode)
 
 **Groups & audio**
 - `spectator_player_possession` — config option is parsed but unused; spectators cannot speak *through* the player they are spectating
-- `LocationSoundPacket` emission (struct is defined and serializable, but never sent)
-- Hidden-group listing suppression
+- Persistent/hidden group creation and persistence across server restarts
 
 **Commands & permissions**
 - `/voicechat help`
 - `/voicechat test <target>` (admin connection ping test) and the equivalent `voicechat.admin` permission node
-- Group-name tab completion for `/voicechat join`
 
 **Integrations & extensibility**
 - The addon/plugin API (`VoicechatServerApi`): 38 event types, audio channels (`Static` / `Locational` / `Entity`), `AudioPlayer`, Opus encoder/decoder, MP3, custom sockets, raw UDP packet interception
 - Proxy forwarding (Velocity / BungeeCord / Waterfall companion plugins)
 - PlaceholderAPI placeholders and ViaVersion compatibility layer
-- Translated command *descriptions* (the Pumpkin API does not translate command-tree descriptions yet — messages are translated, descriptions stay English)
 - `use_natives` / `threaded_server_support` config options (not portable to WASM/Pumpkin — intentionally omitted)
 
 ### Client-side features (out of scope for the server)
@@ -225,18 +221,14 @@ Push-to-talk, voice activation, automatic voice-activity detection, automatic mi
 
 ## Translations
 
-The plugin uses **Pumpkin's own translation system** (the `i18n` host interface) instead of rolling its own:
+The plugin owns a small JSON translation registry so languages are discovered by file name and are not coupled to a hand-maintained Rust locale enum:
 
-1. On load, the plugin registers flat JSON language maps under the `pumpkin_voice` namespace with the host (`i18n.load-translations`).
-2. Every player-facing message is built as a `TextComponent::custom("pumpkin_voice", key, locale, args)` component, where `locale` comes from `player.get_locale()` (the client's language setting).
-3. The **host** resolves `pumpkin_voice:<key>` for that locale when the text is serialized, substituting `%s` placeholders with the argument components. Missing translations fall back to `en_us`, then to the raw key — an incomplete language file can never break a message.
+1. `build.rs` scans every `lang/*.json` file and embeds it in the WASM component at build time.
+2. On load, the plugin scans `<plugin data folder>/lang/*.json` and merges those files after the embedded catalogs. A data-folder file may define a new locale or override only selected keys.
+3. Player-facing messages use `player.get_locale()`. Registration-time descriptions and console logs use the `language` value from `config.toml`.
+4. `%s` and indexed `%N$s` placeholders are substituted by the plugin. Missing keys fall back to `en_us`, then to the raw key.
 
-### Built-in languages
-
-| Locale | File |
-| ------ | ---- |
-| `en_us` (fallback) | `lang/en_us.json` |
-| `zh_cn` | `lang/zh_cn.json` |
+The files currently shipped under `lang/` provide `en_us` (the fallback) and `zh_cn`. That list is intentionally not duplicated in Rust source: the directory is the source of truth.
 
 ### Adding or overriding languages at runtime
 
@@ -249,27 +241,11 @@ Server admins can add a language or override any built-in string without recompi
 }
 ```
 
-To ship a new language **built in**, add `lang/<locale>.json` next to the crate root and extend the `locale_from_str` match in `src/i18n.rs` (only locales that carry files need listing — everything else falls back to English host-side anyway).
+To ship a new language **built in**, add `lang/<locale>.json` at the crate root and rebuild. No Rust source change or locale registration is needed.
 
-### Translation keys
+`lang/en_us.json` is the key reference. It includes player messages, plugin/command/permission descriptions, default category labels, errors, and console log templates. Tests reject embedded catalogs with invalid JSON or a key set that differs from `en_us`.
 
-| Key | Message |
-| --- | ------- |
-| `command.join.only_player` | "Only players can join groups." |
-| `command.join.no_permission` | "You do not have permission to use voice groups." |
-| `command.join.group_not_found` | "Group does not exist" |
-| `command.join.missing_password` | "Missing password" |
-| `command.join.incorrect_password` | "Incorrect password" |
-| `command.join.joined` | "Joined group %s" |
-| `command.leave.only_player` | "Only players can leave groups." |
-| `command.leave.left` | "Left group" |
-| `command.invite.only_player` | "Only players can invite to groups." |
-| `command.invite.not_in_group` | "You are not in a group" |
-| `command.invite.sent` | "Invited player(s)" |
-| `command.invite.message` | "%s invited you to group '%s'. Type: /voicechat join %s%s" |
-| `kick.voice_chat_required` | "You must have the Simple Voice Chat mod installed to play on this server!" |
-
-Console feedback (no client locale) always uses `en_us`. The `/voicechat` command *description* stays English because the Pumpkin API does not translate command-tree descriptions yet.
+Pumpkin requests plugin metadata before it provides the plugin data-folder path or loads `config.toml`, so the metadata description uses the embedded `en_us` fallback. Command and permission descriptions are registered later and therefore use the configured server language.
 
 ---
 
@@ -326,4 +302,3 @@ description = "Global broadcast"
 ### Config Write Errors (WASI)
 **Error:** `Failed to create config folder ... (os error 44)` or `Operation not permitted`.
 **Solution:** This typically indicates a permission or preopen mismatch in the WASI environment. Ensure the plugin metadata requests `fs.read.data` and `fs.write.data` (default in recent versions). The plugin now uses absolute-style relative paths to ensure compatibility with Pumpkin's virtual filesystem.
-

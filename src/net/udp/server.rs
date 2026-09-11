@@ -20,7 +20,14 @@ impl UdpServer {
     pub fn new(state_manager: Arc<StateManager>, addr: &str) -> Result<Self, std::io::Error> {
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        info!("Voice chat UDP server initialized on {}", addr);
+        info!(
+            "{}",
+            crate::i18n::translate_str_with(
+                crate::i18n::default_locale(),
+                "log.udp.initialized",
+                &[addr.to_string()],
+            )
+        );
         Ok(Self {
             state_manager,
             socket,
@@ -47,9 +54,12 @@ impl UdpServer {
                         continue;
                     }
                     error!(
-                        "Error receiving from UDP socket: {} (kind: {:?})",
-                        e,
-                        e.kind()
+                        "{}",
+                        crate::i18n::translate_str_with(
+                            crate::i18n::default_locale(),
+                            "log.udp.receive_failed",
+                            &[e.to_string(), format!("{:?}", e.kind())],
+                        )
                     );
                     break;
                 }
@@ -105,9 +115,12 @@ impl UdpServer {
 
             if payload_bytes.is_empty() && !data[17..].is_empty() {
                 tracing::debug!(
-                    "Failed to read VarInt length or empty payload from {} (raw len={})",
-                    player_id,
-                    data.len()
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        crate::i18n::default_locale(),
+                        "log.udp.invalid_payload",
+                        &[player_id.to_string(), data.len().to_string()],
+                    )
                 );
                 return;
             }
@@ -130,10 +143,16 @@ impl UdpServer {
                             let mic_packet =
                                 crate::net::voice_packets::MicPacket::from_bytes(&mut packet_data);
                             tracing::debug!(
-                                "Received mic packet from {} (seq={}, len={})",
-                                player_id,
-                                mic_packet.sequence_number,
-                                mic_packet.data.len()
+                                "{}",
+                                crate::i18n::translate_str_with(
+                                    crate::i18n::default_locale(),
+                                    "log.udp.mic_received",
+                                    &[
+                                        player_id.to_string(),
+                                        mic_packet.sequence_number.to_string(),
+                                        mic_packet.data.len().to_string(),
+                                    ],
+                                )
                             );
                             let all_players = self.state_manager.get_all_players_sync();
 
@@ -143,8 +162,12 @@ impl UdpServer {
                                 Some(p) => p,
                                 None => {
                                     tracing::debug!(
-                                        "Mic packet from {}: player not found in server",
-                                        player_id
+                                        "{}",
+                                        crate::i18n::translate_str_with(
+                                            crate::i18n::default_locale(),
+                                            "log.udp.player_not_found",
+                                            &[player_id.to_string()],
+                                        )
                                     );
                                     return;
                                 }
@@ -152,8 +175,12 @@ impl UdpServer {
 
                             if !sender_pl.has_permission("pumpkin_voice:speak") {
                                 tracing::debug!(
-                                    "Mic packet from {}: missing pumpkin_voice:speak permission",
-                                    player_id
+                                    "{}",
+                                    crate::i18n::translate_str_with(
+                                        crate::i18n::default_locale(),
+                                        "log.udp.speak_permission_missing",
+                                        &[player_id.to_string()],
+                                    )
                                 );
                                 return;
                             }
@@ -163,9 +190,10 @@ impl UdpServer {
                                 sender_pl.get_gamemode(),
                                 pumpkin_plugin_api::common::GameMode::Spectator
                             );
-                            if is_spectator && !spectator_interaction {
-                                return;
-                            }
+
+                            let sender_group = player_state
+                                .group
+                                .and_then(|group_id| self.state_manager.get_group_sync(&group_id));
 
                             if let Some(group_id) = player_state.group {
                                 let group_packet = crate::net::voice_packets::GroupSoundPacket {
@@ -175,8 +203,13 @@ impl UdpServer {
                                     sequence_number: mic_packet.sequence_number,
                                     category: None,
                                 };
-                                for receiver in all_players {
-                                    if receiver.uuid == player_id {
+                                for receiver in &all_players {
+                                    if receiver.uuid == player_id
+                                        || !receiver_accepts_audio(
+                                            receiver.disabled,
+                                            receiver.disconnected,
+                                        )
+                                    {
                                         continue;
                                     }
                                     if receiver.group == Some(group_id)
@@ -194,13 +227,21 @@ impl UdpServer {
                                             );
                                         } else {
                                             tracing::debug!(
-                                                "Skipping receiver {}: missing pumpkin_voice:listen permission",
-                                                receiver.uuid
+                                                "{}",
+                                                crate::i18n::translate_str_with(
+                                                    crate::i18n::default_locale(),
+                                                    "log.udp.listen_permission_missing",
+                                                    &[receiver.uuid.to_string()],
+                                                )
                                             );
                                         }
                                     }
                                 }
-                            } else {
+                            }
+
+                            if should_route_proximity(sender_group.as_ref())
+                                && (!is_spectator || spectator_interaction)
+                            {
                                 let pos_a = sender_pl.get_position();
                                 let distance_config = if mic_packet.whispering {
                                     whisper_distance
@@ -216,9 +257,49 @@ impl UdpServer {
                                 .max(distance_config);
 
                                 let distance_sq = broadcast_range.powi(2);
+                                let proximity_packet = if is_spectator {
+                                    let eye_pos = sender_pl.as_entity().get_eye_position();
+                                    VoicePacket::LocationSound(
+                                        crate::net::voice_packets::LocationSoundPacket {
+                                            channel_id: player_id,
+                                            sender: player_id,
+                                            location: [eye_pos.0, eye_pos.1, eye_pos.2],
+                                            data: mic_packet.data.clone(),
+                                            sequence_number: mic_packet.sequence_number,
+                                            distance: distance_config as f32,
+                                            category: None,
+                                        },
+                                    )
+                                } else {
+                                    VoicePacket::PlayerSound(
+                                        crate::net::voice_packets::PlayerSoundPacket {
+                                            channel_id: player_id,
+                                            sender: player_id,
+                                            data: mic_packet.data.clone(),
+                                            sequence_number: mic_packet.sequence_number,
+                                            distance: distance_config as f32,
+                                            whispering: mic_packet.whispering,
+                                            category: None,
+                                        },
+                                    )
+                                };
 
-                                for receiver in all_players {
-                                    if receiver.uuid == player_id {
+                                for receiver in &all_players {
+                                    let receiver_group_type = receiver
+                                        .group
+                                        .and_then(|group_id| {
+                                            self.state_manager.get_group_sync(&group_id)
+                                        })
+                                        .map(|group| group.group_type);
+                                    if receiver.uuid == player_id
+                                        || !should_receive_proximity(
+                                            player_state.group,
+                                            receiver.group,
+                                            receiver_group_type,
+                                            receiver.disabled,
+                                            receiver.disconnected,
+                                        )
+                                    {
                                         continue;
                                     }
                                     if let Some(addr) = receiver.socket_addr
@@ -237,26 +318,21 @@ impl UdpServer {
                                                     + (pos_a.2 - pos_b.2).powi(2);
 
                                                 if dist <= distance_sq {
-                                                    let sound_packet = crate::net::voice_packets::PlayerSoundPacket {
-                                                            channel_id: player_id,
-                                                            sender: player_id,
-                                                            data: mic_packet.data.clone(),
-                                                            sequence_number: mic_packet.sequence_number,
-                                                            distance: distance_config as f32,
-                                                            whispering: mic_packet.whispering,
-                                                            category: None,
-                                                        };
                                                     let _ = send_packet(
                                                         &self.socket,
                                                         addr,
-                                                        VoicePacket::PlayerSound(sound_packet),
+                                                        proximity_packet.clone(),
                                                         &receiver.secret,
                                                     );
                                                 }
                                             } else {
                                                 tracing::debug!(
-                                                    "Skipping receiver {}: missing pumpkin_voice:listen permission",
-                                                    receiver.uuid
+                                                    "{}",
+                                                    crate::i18n::translate_str_with(
+                                                        crate::i18n::default_locale(),
+                                                        "log.udp.listen_permission_missing",
+                                                        &[receiver.uuid.to_string()],
+                                                    )
                                                 );
                                             }
                                         }
@@ -268,8 +344,12 @@ impl UdpServer {
                             let auth_packet = AuthenticatePacket::from_bytes(&mut packet_data);
                             if auth_packet.secret.to_bytes() == player_state.secret.to_bytes() {
                                 info!(
-                                    "Successfully authenticated player {}",
-                                    auth_packet.player_uuid
+                                    "{}",
+                                    crate::i18n::translate_str_with(
+                                        crate::i18n::default_locale(),
+                                        "log.udp.authenticated",
+                                        &[auth_packet.player_uuid.to_string()],
+                                    )
                                 );
                                 self.state_manager.update_player_addr_sync(&player_id, src);
 
@@ -296,7 +376,14 @@ impl UdpServer {
                             }
                         }
                         0x9 => {
-                            info!("Validated connection of player {}", player_id);
+                            info!(
+                                "{}",
+                                crate::i18n::translate_str_with(
+                                    crate::i18n::default_locale(),
+                                    "log.udp.validated",
+                                    &[player_id.to_string()],
+                                )
+                            );
                             let _ = send_packet(
                                 &self.socket,
                                 src,
@@ -306,22 +393,113 @@ impl UdpServer {
                         }
                         _ => {
                             tracing::debug!(
-                                "Received unknown UDP packet type {} from {}",
-                                packet_type,
-                                player_id
+                                "{}",
+                                crate::i18n::translate_str_with(
+                                    crate::i18n::default_locale(),
+                                    "log.udp.unknown_packet",
+                                    &[packet_type.to_string(), player_id.to_string()],
+                                )
                             );
                         }
                     }
                 }
                 Err(e) => {
                     error!(
-                        "Failed to decrypt packet from {} (len={}): {}",
-                        player_id,
-                        payload_bytes.len(),
-                        e
+                        "{}",
+                        crate::i18n::translate_str_with(
+                            crate::i18n::default_locale(),
+                            "log.udp.decrypt_failed",
+                            &[
+                                player_id.to_string(),
+                                payload_bytes.len().to_string(),
+                                e.to_string(),
+                            ],
+                        )
                     );
                 }
             }
         }
+    }
+}
+
+fn receiver_accepts_audio(disabled: bool, disconnected: bool) -> bool {
+    !disabled && !disconnected
+}
+
+fn should_route_proximity(sender_group: Option<&crate::state::Group>) -> bool {
+    sender_group.is_none_or(|group| group.group_type.is_open())
+}
+
+fn should_receive_proximity(
+    sender_group: Option<Uuid>,
+    receiver_group: Option<Uuid>,
+    receiver_group_type: Option<crate::state::GroupType>,
+    disabled: bool,
+    disconnected: bool,
+) -> bool {
+    receiver_accepts_audio(disabled, disconnected)
+        && !(sender_group.is_some() && sender_group == receiver_group)
+        && !receiver_group_type.is_some_and(crate::state::GroupType::is_isolated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{receiver_accepts_audio, should_receive_proximity, should_route_proximity};
+    use crate::state::{Group, GroupType};
+    use uuid::Uuid;
+
+    fn group(group_type: GroupType) -> Group {
+        Group {
+            id: Uuid::new_v4(),
+            name: "test".to_string(),
+            password: None,
+            persistent: false,
+            hidden: false,
+            group_type,
+        }
+    }
+
+    #[test]
+    fn only_open_groups_also_route_proximity_audio() {
+        assert!(should_route_proximity(None));
+        assert!(!should_route_proximity(Some(&group(GroupType::Normal))));
+        assert!(should_route_proximity(Some(&group(GroupType::Open))));
+        assert!(!should_route_proximity(Some(&group(GroupType::Isolated))));
+    }
+
+    #[test]
+    fn disabled_or_disconnected_receivers_do_not_accept_audio() {
+        assert!(receiver_accepts_audio(false, false));
+        assert!(!receiver_accepts_audio(true, false));
+        assert!(!receiver_accepts_audio(false, true));
+        assert!(!receiver_accepts_audio(true, true));
+    }
+
+    #[test]
+    fn proximity_skips_same_open_group_and_isolated_receivers() {
+        let sender_group = Uuid::new_v4();
+        let other_group = Uuid::new_v4();
+
+        assert!(!should_receive_proximity(
+            Some(sender_group),
+            Some(sender_group),
+            Some(GroupType::Open),
+            false,
+            false,
+        ));
+        assert!(!should_receive_proximity(
+            None,
+            Some(other_group),
+            Some(GroupType::Isolated),
+            false,
+            false,
+        ));
+        assert!(should_receive_proximity(
+            None,
+            Some(other_group),
+            Some(GroupType::Normal),
+            false,
+            false,
+        ));
     }
 }

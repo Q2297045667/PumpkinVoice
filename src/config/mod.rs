@@ -37,7 +37,7 @@ pub struct VoicechatConfig {
 impl Default for VoicechatConfig {
     fn default() -> Self {
         Self {
-            language: "en_us".to_string(),
+            language: crate::i18n::FALLBACK_LOCALE.to_string(),
             port: 24454,
             bind_address: String::new(),
             max_voice_distance: 48.0,
@@ -57,8 +57,14 @@ impl Default for VoicechatConfig {
             max_packets_per_second: 500,
             categories: vec![CategoryConfig {
                 id: "radio".to_string(),
-                name: "Radio Team".to_string(),
-                description: Some("Global broadcast".to_string()),
+                name: crate::i18n::translate_str(
+                    crate::i18n::FALLBACK_LOCALE,
+                    "category.radio.name",
+                ),
+                description: Some(crate::i18n::translate_str(
+                    crate::i18n::FALLBACK_LOCALE,
+                    "category.radio.description",
+                )),
             }],
         }
     }
@@ -66,7 +72,7 @@ impl Default for VoicechatConfig {
 
 pub static CONFIG: LazyLock<RwLock<VoicechatConfig>> = LazyLock::new(|| {
     RwLock::new(VoicechatConfig {
-        language: "en_us".to_string(),
+        language: crate::i18n::FALLBACK_LOCALE.to_string(),
         port: 24454,
         bind_address: String::new(),
         max_voice_distance: 48.0,
@@ -95,12 +101,22 @@ impl VoicechatConfig {
         let config_dir = PathBuf::from(cleaned);
 
         if !config_dir.exists() && !cleaned.is_empty() {
-            debug!("creating new config root folder: {:?}", config_dir);
+            debug!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::FALLBACK_LOCALE,
+                    "log.config.creating_folder",
+                    &[config_dir.display().to_string()],
+                )
+            );
             if let Err(err) = fs::create_dir_all(&config_dir) {
                 tracing::error!(
-                    "Failed to create config root folder {:?}: {}",
-                    config_dir,
-                    err
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        crate::i18n::FALLBACK_LOCALE,
+                        "log.config.create_folder_failed",
+                        &[config_dir.display().to_string(), err.to_string()],
+                    )
                 );
                 return;
             }
@@ -113,9 +129,12 @@ impl VoicechatConfig {
                 Ok(content) => content,
                 Err(err) => {
                     tracing::error!(
-                        "Couldn't read configuration file at {:?}. Reason: {}",
-                        &path,
-                        err
+                        "{}",
+                        crate::i18n::translate_str_with(
+                            crate::i18n::FALLBACK_LOCALE,
+                            "log.config.read_failed",
+                            &[path.display().to_string(), err.to_string()],
+                        )
                     );
                     return;
                 }
@@ -125,9 +144,12 @@ impl VoicechatConfig {
                 Ok(cfg) => cfg,
                 Err(err) => {
                     tracing::error!(
-                        "Couldn't parse config at {:?}. Reason: {}. This is probably caused by a config update; just delete the old config and start Pumpkin again",
-                        &path,
-                        err
+                        "{}",
+                        crate::i18n::translate_str_with(
+                            crate::i18n::FALLBACK_LOCALE,
+                            "log.config.parse_failed",
+                            &[path.display().to_string(), err.to_string()],
+                        )
                     );
                     return;
                 }
@@ -138,9 +160,12 @@ impl VoicechatConfig {
 
             if let Err(err) = fs::write(&path, &toml_string) {
                 tracing::warn!(
-                    "Couldn't write default config to {:?}. Reason: {}",
-                    &path,
-                    err
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        crate::i18n::FALLBACK_LOCALE,
+                        "log.config.write_failed",
+                        &[path.display().to_string(), err.to_string()],
+                    )
                 );
             }
             content

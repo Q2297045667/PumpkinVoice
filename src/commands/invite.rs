@@ -4,7 +4,6 @@ use pumpkin_plugin_api::{
     command::{CommandError, CommandSender, ConsumedArgs},
     command_wit::Arg,
     commands::CommandHandler,
-    text::TextComponent,
 };
 use std::sync::Arc;
 
@@ -63,10 +62,10 @@ impl CommandHandler for InviteCommandExecutor {
                                 &target_locale,
                                 "command.invite.message",
                                 vec![
-                                    TextComponent::text(&source_player.get_name()),
-                                    TextComponent::text(&group.name),
-                                    TextComponent::text(&group.id.to_string()),
-                                    TextComponent::text(&pwd_suffix),
+                                    source_player.get_name(),
+                                    group.name.clone(),
+                                    group.id.to_string(),
+                                    pwd_suffix.clone(),
                                 ],
                             ),
                             false,
