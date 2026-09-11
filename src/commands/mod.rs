@@ -21,6 +21,9 @@ pub fn init_command_tree(state_manager: Arc<StateManager>) -> Command {
     let invite_executor = invite::InviteCommandExecutor {
         state_manager: state_manager.clone(),
     };
+    let group_name_suggestions = join::GroupNameSuggestionProvider {
+        state_manager: state_manager.clone(),
+    };
 
     let names_vec: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
 
@@ -30,10 +33,11 @@ pub fn init_command_tree(state_manager: Arc<StateManager>) -> Command {
         crate::i18n::translate_str(crate::i18n::default_locale(), "command.description");
 
     let group_name_node =
-        CommandNode::argument("group_name", &ArgumentType::String(StringType::SingleWord))
+        CommandNode::argument("group_name", &ArgumentType::String(StringType::Quotable))
+            .suggest(group_name_suggestions)
             .execute(join_executor.clone())
             .then(
-                CommandNode::argument("password", &ArgumentType::String(StringType::SingleWord))
+                CommandNode::argument("password", &ArgumentType::String(StringType::Quotable))
                     .execute(join_executor),
             );
     let join_node = CommandNode::literal("join").then(group_name_node);

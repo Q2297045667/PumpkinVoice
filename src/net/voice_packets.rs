@@ -251,3 +251,43 @@ impl ConnectionCheckAckPacket {
 
     pub fn to_bytes(&self, _buf: impl BufMut) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LocationSoundPacket, VoicePacket};
+    use crate::util::buf_ext::BufExt;
+    use bytes::Buf;
+    use uuid::Uuid;
+
+    #[test]
+    fn location_sound_packet_serializes_the_spectator_position() {
+        let channel_id = Uuid::from_u128(1);
+        let sender = Uuid::from_u128(2);
+        let packet = LocationSoundPacket {
+            channel_id,
+            sender,
+            location: [1.25, 64.5, -9.75],
+            data: vec![1, 2, 3],
+            sequence_number: 42,
+            distance: 48.0,
+            category: Some("spectator".to_string()),
+        };
+        let mut bytes = Vec::new();
+        packet.to_bytes(&mut bytes);
+
+        let mut cursor = bytes.as_slice();
+        assert_eq!(cursor.get_uuid(), channel_id);
+        assert_eq!(cursor.get_uuid(), sender);
+        assert_eq!(cursor.get_f64(), 1.25);
+        assert_eq!(cursor.get_f64(), 64.5);
+        assert_eq!(cursor.get_f64(), -9.75);
+        assert_eq!(cursor.get_byte_array(), vec![1, 2, 3]);
+        assert_eq!(cursor.get_i64(), 42);
+        assert_eq!(cursor.get_f32(), 48.0);
+        assert_eq!(cursor.get_u8(), 0b0000_0010);
+        assert_eq!(cursor.get_string(), "spectator");
+        assert!(!cursor.has_remaining());
+
+        assert_eq!(VoicePacket::LocationSound(packet).get_type_id(), 0x4);
+    }
+}

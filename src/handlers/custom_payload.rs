@@ -1,7 +1,8 @@
 use crate::net::custom_payloads::{
-    AddGroupPacket, JoinedGroupPacket, PlayerStatePacket, RemoveGroupPacket,
+    AddGroupPacket, JoinedGroupPacket, PlayerStatePacket, REQUEST_SECRET_CHANNEL,
+    RemoveGroupPacket, RequestSecretPacket, SECRET_CHANNEL, SecretPacket,
 };
-use crate::state::{Group, StateManager};
+use crate::state::{Group, GroupType, StateManager};
 use crate::util::buf_ext::BufExt;
 use bytes::Buf;
 use pumpkin_plugin_api::{
@@ -26,7 +27,10 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
         let data = &event.data;
         let all_clients = server.get_all_players();
         let state_manager = self.state_manager.clone();
-        let groups_enabled = crate::config::CONFIG.read().unwrap().enable_groups;
+        // Sending a payload can synchronously re-enter the plugin, so only keep
+        // an owned configuration snapshot across host calls.
+        let config = crate::config::CONFIG.read().unwrap().clone();
+        let groups_enabled = config.enable_groups;
 
         let uuid = crate::util::wit_uuid_to_uuid(player.get_id());
 
@@ -46,11 +50,34 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
             }
         };
 
-        if channel == "voicechat:update_state" {
+        if channel == REQUEST_SECRET_CHANNEL {
+            if let Some(request) = RequestSecretPacket::from_bytes(data)
+                && let Some(state) = state_manager.get_player_sync(&uuid)
+                && let Some(java_player) = player.as_java()
+            {
+                let packet = SecretPacket::from_config(state.secret, uuid, &config);
+                java_player.send_custom_payload(SECRET_CHANNEL, &packet.to_bytes());
+                info!(
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        crate::i18n::default_locale(),
+                        "log.player.secret_requested",
+                        &[uuid.to_string(), request.compatibility_version.to_string()],
+                    )
+                );
+            }
+        } else if channel == "voicechat:update_state" {
             let mut cursor = std::io::Cursor::new(data);
             let disabled = cursor.get_u8() != 0;
 
-            info!("Player {:?} updated state: disabled={}", uuid, disabled);
+            info!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.player.state_updated",
+                    &[uuid.to_string(), disabled.to_string()],
+                )
+            );
             state_manager.update_state_sync(&uuid, false, disabled);
 
             bc_state();
@@ -64,7 +91,14 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
                 None
             };
 
-            info!("{:?} wants to join group via GUI {}", uuid, group_id);
+            info!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.group.gui_join_requested",
+                    &[uuid.to_string(), group_id.to_string()],
+                )
+            );
             if let Some(group) = state_manager.get_group_sync(&group_id) {
                 if group.password == password {
                     let old_group = state_manager.get_player_sync(&uuid).and_then(|p| p.group);
@@ -123,16 +157,23 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
                 None
             };
 
-            let group_type = cursor.get_i16();
+            let group_type = GroupType::from_wire(cursor.get_i16());
 
-            info!("{:?} wants to create a group named {}", uuid, name);
+            info!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.group.gui_create_requested",
+                    &[uuid.to_string(), name.clone()],
+                )
+            );
             let new_group = Group {
                 id: uuid::Uuid::new_v4(),
                 name,
                 password,
                 persistent: false,
                 hidden: false,
-                group_type: group_type as i32,
+                group_type,
             };
 
             state_manager.add_group_sync(new_group.clone());
@@ -144,7 +185,7 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
                 password: new_group.password.is_some(),
                 persistent: false,
                 hidden: false,
-                group_type,
+                group_type: group_type.to_wire(),
             };
             let add_group_bytes = add_group_packet.to_bytes();
 
@@ -165,7 +206,14 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
             }
             bc_state();
         } else if channel == "voicechat:leave_group" {
-            info!("Player {:?} left group", uuid);
+            info!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.group.gui_left",
+                    &[uuid.to_string()],
+                )
+            );
             let old_group = state_manager.get_player_sync(&uuid).and_then(|p| p.group);
 
             state_manager.set_player_group_sync(&uuid, None);

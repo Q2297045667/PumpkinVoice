@@ -105,6 +105,13 @@ impl StateManager {
             .cloned()
     }
 
+    pub fn get_group_by_identifier_sync(&self, identifier: &str) -> Option<Group> {
+        Uuid::parse_str(identifier)
+            .ok()
+            .and_then(|id| self.get_group_sync(&id))
+            .or_else(|| self.get_group_by_name_sync(identifier))
+    }
+
     pub fn get_all_groups_sync(&self) -> Vec<Group> {
         self.groups.read().unwrap().values().cloned().collect()
     }
@@ -150,5 +157,39 @@ impl StateManager {
 impl Default for StateManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StateManager;
+    use crate::state::{Group, GroupType};
+    use uuid::Uuid;
+
+    #[test]
+    fn group_identifiers_accept_both_uuid_and_exact_name() {
+        let manager = StateManager::new();
+        let group = Group {
+            id: Uuid::new_v4(),
+            name: "Builders Lounge".to_string(),
+            password: None,
+            persistent: false,
+            hidden: false,
+            group_type: GroupType::Normal,
+        };
+        manager.add_group_sync(group.clone());
+
+        assert_eq!(
+            manager
+                .get_group_by_identifier_sync(&group.id.to_string())
+                .map(|found| found.id),
+            Some(group.id)
+        );
+        assert_eq!(
+            manager
+                .get_group_by_identifier_sync(&group.name)
+                .map(|found| found.id),
+            Some(group.id)
+        );
     }
 }

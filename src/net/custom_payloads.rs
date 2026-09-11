@@ -5,6 +5,8 @@ use crate::state::Secret;
 use crate::util::buf_ext::BufMutExt;
 
 pub const SECRET_CHANNEL: &str = "voicechat:secret";
+pub const REQUEST_SECRET_CHANNEL: &str = "voicechat:request_secret";
+pub const REMOVE_STATE_CHANNEL: &str = "voicechat:remove_state";
 pub const PLUGIN_MESSAGE_PORT: i32 = 24454;
 
 pub struct SecretPacket {
@@ -21,6 +23,38 @@ pub struct SecretPacket {
 }
 
 impl SecretPacket {
+    #[must_use]
+    pub fn from_config(
+        secret: Secret,
+        player_uuid: Uuid,
+        config: &crate::config::VoicechatConfig,
+    ) -> Self {
+        let codec = match config.codec.as_str() {
+            "VOIP" => 0,
+            "AUDIO" => 1,
+            "RESTRICTED_LOWDELAY" => 2,
+            _ => 0,
+        };
+        let server_port = if config.port == -1 {
+            PLUGIN_MESSAGE_PORT
+        } else {
+            config.port
+        };
+
+        Self {
+            secret,
+            server_port,
+            player_uuid,
+            codec,
+            mtu_size: config.mtu_size,
+            distance: config.max_voice_distance,
+            keep_alive: config.keep_alive,
+            groups_enabled: config.enable_groups,
+            voice_host: config.voice_host.clone(),
+            allow_recording: config.allow_recording,
+        }
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = BytesMut::new();
         // Secret mapped as UUID bytes
@@ -37,6 +71,20 @@ impl SecretPacket {
 
         buf.put_u8(if self.allow_recording { 1 } else { 0 });
         buf.to_vec()
+    }
+}
+
+pub struct RequestSecretPacket {
+    pub compatibility_version: i32,
+}
+
+impl RequestSecretPacket {
+    #[must_use]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
+        Some(Self {
+            compatibility_version: i32::from_be_bytes(bytes),
+        })
     }
 }
 
@@ -75,6 +123,19 @@ impl<'a> AddGroupPacket<'a> {
 
 pub struct RemoveGroupPacket {
     pub group: Uuid,
+}
+
+pub struct RemovePlayerStatePacket {
+    pub player_uuid: Uuid,
+}
+
+impl RemovePlayerStatePacket {
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        buf.put_uuid(self.player_uuid);
+        buf.to_vec()
+    }
 }
 
 impl RemoveGroupPacket {
@@ -202,5 +263,72 @@ impl<'a> PlayerStatesPacket<'a> {
         }
 
         buf.to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AddGroupPacket, PLUGIN_MESSAGE_PORT, RemovePlayerStatePacket, RequestSecretPacket,
+        SecretPacket,
+    };
+    use crate::{config::VoicechatConfig, state::Secret};
+    use uuid::Uuid;
+
+    #[test]
+    fn request_secret_reads_the_big_endian_compatibility_version() {
+        assert_eq!(
+            RequestSecretPacket::from_bytes(&20_i32.to_be_bytes())
+                .expect("four bytes should form a request")
+                .compatibility_version,
+            20
+        );
+        assert!(RequestSecretPacket::from_bytes(&[0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn secret_replies_reuse_the_configured_wire_settings() {
+        let config = VoicechatConfig {
+            port: -1,
+            codec: "AUDIO".to_string(),
+            voice_host: "voice.example.test".to_string(),
+            ..VoicechatConfig::default()
+        };
+        let secret = Secret::from_bytes([7; 16]);
+        let player_uuid = Uuid::new_v4();
+
+        let packet = SecretPacket::from_config(secret, player_uuid, &config);
+
+        assert_eq!(packet.server_port, PLUGIN_MESSAGE_PORT);
+        assert_eq!(packet.player_uuid, player_uuid);
+        assert_eq!(packet.codec, 1);
+        assert_eq!(packet.voice_host, "voice.example.test");
+        assert_eq!(packet.keep_alive, config.keep_alive);
+    }
+
+    #[test]
+    fn remove_state_packet_is_exactly_one_uuid() {
+        let player_uuid = Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
+        let bytes = RemovePlayerStatePacket { player_uuid }.to_bytes();
+
+        assert_eq!(bytes, player_uuid.as_bytes());
+    }
+
+    #[test]
+    fn add_group_packet_preserves_all_group_metadata() {
+        let id = Uuid::nil();
+        let bytes = AddGroupPacket {
+            id,
+            name: "g",
+            password: true,
+            persistent: false,
+            hidden: true,
+            group_type: 2,
+        }
+        .to_bytes();
+
+        let mut expected = vec![0; 16];
+        expected.extend_from_slice(&[1, b'g', 1, 0, 1, 0, 2]);
+        assert_eq!(bytes, expected);
     }
 }

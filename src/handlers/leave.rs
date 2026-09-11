@@ -1,4 +1,6 @@
-use crate::net::custom_payloads::{PlayerStatePacket, RemoveGroupPacket};
+use crate::net::custom_payloads::{
+    REMOVE_STATE_CHANNEL, RemoveGroupPacket, RemovePlayerStatePacket,
+};
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
     Server,
@@ -26,22 +28,15 @@ impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
 
         let old_group = state_manager.get_player_sync(&uuid).and_then(|p| p.group);
 
-        // Mark disconnected first before broadcasting
-        state_manager.update_state_sync(&uuid, true, false);
-
-        // Broadcast the disconnect state to everyone else
-        if let Some(state) = state_manager.get_player_sync(&uuid) {
-            let bc_packet = PlayerStatePacket {
-                player_state: &state,
-            };
-            let bc_bytes = bc_packet.to_bytes();
-
-            for client in &all_clients {
-                if crate::util::wit_uuid_to_uuid(client.get_id()) != uuid
-                    && let Some(java_player) = client.as_java()
-                {
-                    java_player.send_custom_payload("voicechat:state", &bc_bytes);
-                }
+        // A player leaving the Minecraft server removes the entry entirely;
+        // `voicechat:state(disconnected=true)` is reserved for a voice-only
+        // disconnect while the player remains online.
+        let remove_state = RemovePlayerStatePacket { player_uuid: uuid }.to_bytes();
+        for client in &all_clients {
+            if crate::util::wit_uuid_to_uuid(client.get_id()) != uuid
+                && let Some(java_player) = client.as_java()
+            {
+                java_player.send_custom_payload(REMOVE_STATE_CHANNEL, &remove_state);
             }
         }
 
@@ -60,7 +55,14 @@ impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
             }
         }
 
-        info!("Removed player {:?} from voice chat state", uuid);
+        info!(
+            "{}",
+            crate::i18n::translate_str_with(
+                crate::i18n::default_locale(),
+                "log.player.state_removed",
+                &[uuid.to_string()],
+            )
+        );
         event
     }
 }

@@ -1,10 +1,12 @@
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
     Server,
-    command::{CommandError, CommandSender, ConsumedArgs},
+    command::{
+        CommandError, CommandSender, CommandSuggestion, CommandSuggestions, ConsumedArgs,
+        SuggestionRequest,
+    },
     command_wit::Arg,
-    commands::CommandHandler,
-    text::TextComponent,
+    commands::{CommandHandler, CommandSuggestionHandler},
 };
 use std::sync::Arc;
 
@@ -13,6 +15,57 @@ pub struct JoinCommandExecutor {
     pub state_manager: Arc<StateManager>,
 }
 
+pub struct GroupNameSuggestionProvider {
+    pub state_manager: Arc<StateManager>,
+}
+
+impl CommandSuggestionHandler for GroupNameSuggestionProvider {
+    fn suggest(
+        &self,
+        _sender: CommandSender,
+        _server: Server,
+        request: SuggestionRequest,
+    ) -> CommandSuggestions {
+        let names = suggested_group_arguments(
+            &self.state_manager.get_all_groups_sync(),
+            request.remaining.as_str(),
+        );
+        CommandSuggestions {
+            start: request.start,
+            length: request.remaining.len() as u32,
+            values: names
+                .into_iter()
+                .map(|value| CommandSuggestion {
+                    value,
+                    tooltip: None,
+                })
+                .collect(),
+        }
+    }
+}
+
+fn suggested_group_arguments(groups: &[crate::state::Group], remaining: &str) -> Vec<String> {
+    let prefix = remaining
+        .strip_prefix('"')
+        .unwrap_or(remaining)
+        .to_lowercase();
+    let mut names: Vec<_> = groups
+        .iter()
+        .filter(|group| !group.hidden && group.name.to_lowercase().starts_with(&prefix))
+        .map(|group| group.name.as_str())
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names.into_iter().map(quote_argument).collect()
+}
+
+fn quote_argument(value: &str) -> String {
+    if value.chars().any(char::is_whitespace) {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
 impl CommandHandler for JoinCommandExecutor {
     fn handle(
         &self,
@@ -53,8 +106,9 @@ impl CommandHandler for JoinCommandExecutor {
 
         let player_uuid = crate::util::wit_uuid_to_uuid(player.get_id());
 
-        // Look up group securely
-        if let Some(group) = self.state_manager.get_group_by_name_sync(&group_name) {
+        // Invitations contain the stable group UUID. Human-entered commands may
+        // use the exact group name instead.
+        if let Some(group) = self.state_manager.get_group_by_identifier_sync(&group_name) {
             let password_ok = match &group.password {
                 None => true,
                 Some(expected) => password.as_deref() == Some(expected.as_str()),
@@ -107,7 +161,7 @@ impl CommandHandler for JoinCommandExecutor {
                 sender.send_message(crate::i18n::tr_with(
                     &locale,
                     "command.join.joined",
-                    vec![TextComponent::text(&group_name)],
+                    vec![group.name.clone()],
                 ));
             } else {
                 let joined_packet = crate::net::JoinedGroupPacket {
@@ -131,5 +185,52 @@ impl CommandHandler for JoinCommandExecutor {
         }
 
         Ok(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{quote_argument, suggested_group_arguments};
+    use crate::state::{Group, GroupType};
+    use uuid::Uuid;
+
+    fn group(name: &str, hidden: bool) -> Group {
+        Group {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            password: None,
+            persistent: false,
+            hidden,
+            group_type: GroupType::Normal,
+        }
+    }
+
+    #[test]
+    fn suggestions_are_filtered_sorted_quoted_and_hide_hidden_groups() {
+        let groups = vec![
+            group("Zulu", false),
+            group("Alpha Team", false),
+            group("alpha", false),
+            group("Admin", true),
+        ];
+
+        assert_eq!(
+            suggested_group_arguments(&groups, "a"),
+            vec!["alpha", "\"Alpha Team\""]
+        );
+        assert_eq!(
+            suggested_group_arguments(&groups, "\"alpha"),
+            vec!["alpha", "\"Alpha Team\""]
+        );
+    }
+
+    #[test]
+    fn command_arguments_escape_quotes_and_backslashes() {
+        assert_eq!(quote_argument("NoSpaces"), "NoSpaces");
+        assert_eq!(
+            quote_argument("A \"quoted\" group"),
+            "\"A \\\"quoted\\\" group\""
+        );
+        assert_eq!(quote_argument("A \\ group"), "\"A \\\\ group\"");
     }
 }

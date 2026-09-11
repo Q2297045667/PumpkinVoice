@@ -1,6 +1,5 @@
 use crate::net::custom_payloads::{
-    AddGroupPacket, PLUGIN_MESSAGE_PORT, PlayerStatePacket, PlayerStatesPacket, SECRET_CHANNEL,
-    SecretPacket,
+    AddGroupPacket, PlayerStatePacket, PlayerStatesPacket, SECRET_CHANNEL, SecretPacket,
 };
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
@@ -33,37 +32,20 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
         // Add player to state manager and generate secret
         let secret = state_manager.add_player_sync(uuid, name);
 
-        let codec_id = match config.codec.as_str() {
-            "VOIP" => 0,
-            "AUDIO" => 1,
-            "RESTRICTED_LOWDELAY" => 2,
-            _ => 0,
-        };
-
-        let server_port = if config.port == -1 {
-            PLUGIN_MESSAGE_PORT
-        } else {
-            config.port
-        };
-
-        let secret_packet = SecretPacket {
-            secret,
-            server_port,
-            player_uuid: uuid,
-            codec: codec_id,
-            mtu_size: config.mtu_size,
-            distance: config.max_voice_distance,
-            keep_alive: config.keep_alive,
-            groups_enabled: config.enable_groups,
-            voice_host: config.voice_host.clone(),
-            allow_recording: config.allow_recording,
-        };
+        let secret_packet = SecretPacket::from_config(secret, uuid, &config);
 
         let bytes = secret_packet.to_bytes();
         if let Some(java_player) = player.as_java() {
             java_player.send_custom_payload(SECRET_CHANNEL, &bytes);
         }
-        tracing::info!("Sent secret packet to {:?}", uuid);
+        tracing::info!(
+            "{}",
+            crate::i18n::translate_str_with(
+                crate::i18n::default_locale(),
+                "log.player.secret_sent",
+                &[uuid.to_string()],
+            )
+        );
 
         if config.force_voice_chat {
             let sm_clone = state_manager.clone();
@@ -99,9 +81,9 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
                 id: group.id,
                 name: &group.name,
                 password: group.password.is_some(),
-                persistent: true,
-                hidden: false,
-                group_type: 0,
+                persistent: group.persistent,
+                hidden: group.hidden,
+                group_type: group.group_type.to_wire(),
             };
             if let Some(java_player) = player.as_java() {
                 java_player.send_custom_payload("voicechat:add_group", &add_packet.to_bytes());
