@@ -1,4 +1,7 @@
 use crate::state::StateManager;
+use crate::{
+    commands::join::quote_argument, net::custom_payloads::VOICECHAT_COMPATIBILITY_VERSION,
+};
 use pumpkin_plugin_api::{
     Server,
     command::{CommandError, CommandSender, ConsumedArgs},
@@ -34,6 +37,23 @@ impl CommandHandler for InviteCommandExecutor {
         };
 
         let source_locale = source_player.get_locale();
+        let source_uuid = crate::util::wit_uuid_to_uuid(source_player.get_id());
+
+        if !self
+            .state_manager
+            .is_client_compatible_sync(&source_uuid, VOICECHAT_COMPATIBILITY_VERSION)
+        {
+            sender.send_message(crate::i18n::tr(
+                &source_locale,
+                "command.voicechat_required",
+            ));
+            return Ok(1);
+        }
+
+        if !crate::config::CONFIG.read().unwrap().enable_groups {
+            sender.send_message(crate::i18n::tr(&source_locale, "command.groups_disabled"));
+            return Ok(1);
+        }
 
         if !source_player.has_permission("pumpkin_voice:groups") {
             sender.send_message(crate::i18n::tr(
@@ -43,18 +63,29 @@ impl CommandHandler for InviteCommandExecutor {
             return Ok(1);
         }
 
-        let source_uuid = crate::util::wit_uuid_to_uuid(source_player.get_id());
-
         if let Some(player_state) = self.state_manager.get_player_sync(&source_uuid) {
             if let Some(group_id) = player_state.group {
                 if let Some(group) = self.state_manager.get_group_sync(&group_id) {
                     let pwd_suffix = group
                         .password
                         .as_ref()
-                        .map(|p| format!(" {}", p))
+                        .map(|password| format!(" {}", quote_argument(password)))
                         .unwrap_or_default();
 
+                    let mut invited = 0_u32;
                     for target_player in players {
+                        let target_uuid = crate::util::wit_uuid_to_uuid(target_player.get_id());
+                        if !self.state_manager.is_client_compatible_sync(
+                            &target_uuid,
+                            VOICECHAT_COMPATIBILITY_VERSION,
+                        ) {
+                            sender.send_message(crate::i18n::tr_with(
+                                &source_locale,
+                                "command.invite.target_incompatible",
+                                vec![target_player.get_name()],
+                            ));
+                            continue;
+                        }
                         // The invite text is resolved in the *target's* locale.
                         let target_locale = target_player.get_locale();
                         target_player.send_system_message(
@@ -70,8 +101,11 @@ impl CommandHandler for InviteCommandExecutor {
                             ),
                             false,
                         );
+                        invited += 1;
                     }
-                    sender.send_message(crate::i18n::tr(&source_locale, "command.invite.sent"));
+                    if invited > 0 {
+                        sender.send_message(crate::i18n::tr(&source_locale, "command.invite.sent"));
+                    }
                 }
             } else {
                 sender.send_message(crate::i18n::tr(

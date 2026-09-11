@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 # the `pumpkin:plugin@0.1.0` WIT world (pumpkin-plugin-wit @ 1ad73fff).
 # The API crate owns the `wit-bindgen::generate!` + `export!` component glue,
 # so this crate does not need a direct wit-bindgen dependency.
-pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin.git", rev = "7806bc25d3b04f134203dc44c273d9445fe39430", package = "pumpkin-plugin-api" }
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin.git", rev = "2c49af7acb9c62a62b5f22251dc2925f00c4edd8", package = "pumpkin-plugin-api" }
 
 # WASM compatible logging
 tracing = "0.1"
@@ -32,6 +32,7 @@ bytes = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1"
+unicode-general-category = "1.1"
 
 [profile.release] 
 lto = true

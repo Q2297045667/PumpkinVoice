@@ -5,10 +5,11 @@ use uuid::Uuid;
 
 use super::crypto::send_packet;
 use crate::net::voice_packets::{
-    AuthenticateAckPacket, AuthenticatePacket, ConnectionCheckAckPacket, VoicePacket,
+    AuthenticateAckPacket, AuthenticatePacket, ConnectionCheckAckPacket,
+    MAX_VOICE_CHAT_PACKET_SIZE, MicPacket, PingPacket, VoicePacket,
 };
 use crate::state::StateManager;
-use crate::util::buf_ext::BufExt;
+use crate::util::payload_reader::PayloadReader;
 use pumpkin_plugin_api::Server;
 
 pub struct UdpServer {
@@ -67,7 +68,33 @@ impl UdpServer {
         }
     }
 
-    pub fn send_keep_alives(&self) {
+    pub fn send_keep_alives(&self, server: &Server) {
+        let keep_alive_millis = crate::config::CONFIG.read().unwrap().keep_alive.max(1) as u64;
+        let timeout = std::time::Duration::from_millis(keep_alive_millis.saturating_mul(10));
+
+        for state in self.state_manager.expire_voice_connections_sync(timeout) {
+            info!(
+                "{}",
+                crate::i18n::translate_str_with(
+                    crate::i18n::default_locale(),
+                    "log.udp.timed_out",
+                    &[state.uuid.to_string()],
+                )
+            );
+            crate::net::sync::broadcast_player_state(server, &self.state_manager, &state);
+
+            if let Some(player) =
+                server.get_player_by_uuid(crate::util::uuid_to_wit_uuid(state.uuid))
+                && self.state_manager.is_client_compatible_sync(
+                    &state.uuid,
+                    crate::net::custom_payloads::VOICECHAT_COMPATIBILITY_VERSION,
+                )
+            {
+                crate::net::sync::send_full_sync(&player, &self.state_manager);
+                crate::net::sync::send_secret(&player, &self.state_manager);
+            }
+        }
+
         let targets = self.state_manager.get_keep_alive_targets_sync();
         for (target, secret) in targets {
             let _ = send_packet(
@@ -110,10 +137,20 @@ impl UdpServer {
         let player_id = Uuid::from_bytes(uuid_bytes);
 
         if let Some(player_state) = self.state_manager.get_player_sync(&player_id) {
-            let mut payload_buf = &data[17..];
-            let payload_bytes = payload_buf.get_byte_array();
-
-            if payload_bytes.is_empty() && !data[17..].is_empty() {
+            let mut payload_reader = PayloadReader::new(&data[17..]);
+            let Some(payload_bytes) = payload_reader.read_byte_array(MAX_VOICE_CHAT_PACKET_SIZE)
+            else {
+                tracing::debug!(
+                    "{}",
+                    crate::i18n::translate_str_with(
+                        crate::i18n::default_locale(),
+                        "log.udp.invalid_payload",
+                        &[player_id.to_string(), data.len().to_string()],
+                    )
+                );
+                return;
+            };
+            if !payload_reader.is_finished() {
                 tracing::debug!(
                     "{}",
                     crate::i18n::translate_str_with(
@@ -136,12 +173,16 @@ impl UdpServer {
                     }
 
                     let packet_type = decrypted[0];
-                    let mut packet_data = &decrypted[1..];
+                    let packet_data = &decrypted[1..];
 
                     match packet_type {
                         0x1 => {
-                            let mic_packet =
-                                crate::net::voice_packets::MicPacket::from_bytes(&mut packet_data);
+                            if player_state.socket_addr != Some(src) || player_state.disconnected {
+                                return;
+                            }
+                            let Some(mic_packet) = MicPacket::from_bytes(packet_data) else {
+                                return;
+                            };
                             tracing::debug!(
                                 "{}",
                                 crate::i18n::translate_str_with(
@@ -341,8 +382,13 @@ impl UdpServer {
                             }
                         }
                         0x5 => {
-                            let auth_packet = AuthenticatePacket::from_bytes(&mut packet_data);
-                            if auth_packet.secret.to_bytes() == player_state.secret.to_bytes() {
+                            let Some(auth_packet) = AuthenticatePacket::from_bytes(packet_data)
+                            else {
+                                return;
+                            };
+                            if auth_packet.player_uuid == player_id
+                                && auth_packet.secret.to_bytes() == player_state.secret.to_bytes()
+                            {
                                 info!(
                                     "{}",
                                     crate::i18n::translate_str_with(
@@ -351,7 +397,7 @@ impl UdpServer {
                                         &[auth_packet.player_uuid.to_string()],
                                     )
                                 );
-                                self.state_manager.update_player_addr_sync(&player_id, src);
+                                self.state_manager.authenticate_voice_sync(&player_id, src);
 
                                 let _ = send_packet(
                                     &self.socket,
@@ -362,20 +408,39 @@ impl UdpServer {
                             }
                         }
                         0x7 => {
-                            if allow_pings {
+                            if allow_pings
+                                && player_state.socket_addr == Some(src)
+                                && !player_state.disconnected
+                                && let Some(packet) = PingPacket::from_bytes(packet_data)
+                            {
                                 let _ = send_packet(
                                     &self.socket,
                                     src,
-                                    VoicePacket::Ping(
-                                        crate::net::voice_packets::PingPacket::from_bytes(
-                                            &mut packet_data,
-                                        ),
-                                    ),
+                                    VoicePacket::Ping(packet),
                                     &player_state.secret,
                                 );
                             }
                         }
+                        0x8 => {
+                            if !packet_data.is_empty()
+                                || player_state.socket_addr != Some(src)
+                                || player_state.disconnected
+                            {
+                                return;
+                            }
+                            self.state_manager.record_keep_alive_sync(&player_id, src);
+                        }
                         0x9 => {
+                            if !packet_data.is_empty() {
+                                return;
+                            }
+                            let authenticated = self
+                                .state_manager
+                                .get_player_sync(&player_id)
+                                .is_some_and(|state| state.socket_addr == Some(src));
+                            if !authenticated {
+                                return;
+                            }
                             info!(
                                 "{}",
                                 crate::i18n::translate_str_with(
@@ -384,6 +449,16 @@ impl UdpServer {
                                     &[player_id.to_string()],
                                 )
                             );
+                            if let Some(state) = self
+                                .state_manager
+                                .mark_voice_connected_sync(&player_id, src)
+                            {
+                                crate::net::sync::broadcast_player_state(
+                                    server,
+                                    &self.state_manager,
+                                    &state,
+                                );
+                            }
                             let _ = send_packet(
                                 &self.socket,
                                 src,

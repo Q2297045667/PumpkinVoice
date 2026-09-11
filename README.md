@@ -5,7 +5,7 @@ This plugin implements the backend compatibility needed to host the [Simple Voic
 ## Key Features
 
 - **Proximity Chat**: Accurately simulates dimensional audio using 3D vector coordinates sent directly to your game client.
-- **Group Channels**: Full support for the GUI group interfaces (creating groups, joining password-locked groups, leaving groups, managing volume).
+- **Group Channels**: Full support for the GUI group lifecycle (creating, publishing, joining, leaving, and removing empty groups), including passwords and all three upstream group types.
 - **Dynamic Audio Categories**: Create custom audio categories via configuration to differentiate audio streams (e.g. Radio, Global Broadcast) with custom names and descriptions.
 - **Packet Rate Limiting**: Built-in protection against network flooding/DoS using a high-performance token-bucket rate limiter.
 - **Permissions Support**: Fully respects the native PumpkinMC permission node trees.
@@ -26,10 +26,10 @@ This plugin implements the backend compatibility needed to host the [Simple Voic
 
 | Component | Pinned version |
 | --------- | -------------- |
-| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `7806bc25d3b04f134203dc44c273d9445fe39430` (verified 2026-09-11) |
+| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `2c49af7acb9c62a62b5f22251dc2925f00c4edd8` (verified 2026-09-11) |
 | WIT interface | `pumpkin:plugin@0.1.0` (`pumpkin-plugin-wit` rev `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`) |
 | WASM target | `wasm32-wasip2` |
-| Crypto / support crates | `aes-gcm` 0.11, `rand` 0.10, `uuid` 1.26, `bytes` 1.12, `serde` 1.0, `toml` 1.1, `tracing` 0.1 |
+| Crypto / support crates | `aes-gcm` 0.11, `rand` 0.10, `uuid` 1.26, `bytes` 1.12, `serde` 1.0, `toml` 1.1, `tracing` 0.1, `unicode-general-category` 1.1 |
 
 The API is pinned to the Pumpkin `master` tip verified on 2026-09-11. That Pumpkin revision points its `pumpkin-plugin-wit` submodule at `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`, which is also the current WIT repository `master` tip, so the generated guest bindings match the interface consumed by that server revision. `wit-bindgen` is **not** a direct dependency here: the SDK crate owns the `wit_bindgen::generate!` / `export!` component glue.
 
@@ -81,7 +81,7 @@ If you prefer to compile the plugin yourself or are contributing to development:
    cargo test --target x86_64-unknown-linux-gnu
    ```
 
-4. **Deploy the Executable**
+5. **Deploy the Executable**
    Once compiled, move the output WASM file into your server's plugin pool:
    ```bash
    cp target/wasm32-wasip2/release/pumpkin_voice.wasm /path/to/pumpkin/plugins/
@@ -89,7 +89,7 @@ If you prefer to compile the plugin yourself or are contributing to development:
 
 ### Adjust Server Configurations & Connect
 
-The first time you boot the server, the plugin will construct a default configuration file at `plugins/pumpkin_voice/config.toml`.
+The first time you boot the server, the plugin will construct a default configuration file at `plugins/data/pumpkin_voice/config.toml`.
 By default, the plugin will span out a UDP listener concurrently running on port `24454`.
 
 Connect via your Minecraft client. Look at the bottom left of your screen, you should see no "Unplugged" symbol. Press <kbd>V</kbd> to open up the Simple Voice Chat UI to guarantee that the UI says "Voice Chat Connected".
@@ -103,7 +103,7 @@ PumpkinMC directly delegates commands to the plugin via the Brigadier argument m
 | Command | Description | Permission Node |
 |---------|-------------|-----------------|
 | `/voicechat join <group_name> <password>` | Looks up a global group and assigns you to it. Supports passwords. | `pumpkin_voice:groups` |
-| `/voicechat leave` | Disconnects you from your active group bounds. | `pumpkin_voice:groups` |
+| `/voicechat leave` | Leaves your active voice group. As upstream, this does not require the group permission, so a permission change cannot trap a player in a group. | command permission only |
 | `/voicechat invite <target>` | Sends a chat message to a player with a one-click join link. | `pumpkin_voice:groups` |
 
 ---
@@ -130,15 +130,18 @@ src/
 
 ### Request Lifecycle
 
-1. **Player Connection**:
-    - Trigger: `PlayerJoinEvent` inside `lib.rs`.
-    - Action: A new AES secret is generated in `state.rs`, embedded via a `SecretPacket`, and pushed directly over custom payloads via TCP.
+1. **Player Connection and Compatibility Check**:
+    - Trigger: `PlayerJoinEvent`, followed by the client's `voicechat:request_secret` payload.
+    - Action: Join creates the upstream-compatible default disconnected state. After compatibility version `20` is confirmed, the server sends the player-state, category, and group registries in that order, followed by `SecretPacket`. These packets are intentionally not sent before the client registers its plugin channels.
 2. **UDP Handshake Authentication**:
     - Trigger: Client triggers a `AuthenticatePacket` to `udp_server.rs:24454`.
-    - Action: Server validates the UDP source against the expected `Secret`. Modifies `socket_addr` properties.
+    - Action: Server validates the outer and inner player UUID, the expected `Secret`, and the UDP source address. `ConnectionCheck` then promotes the pending socket to a connected voice state and broadcasts that state.
 3. **Continuous Audio Delivery**:
     - Trigger: Player pushes to talk. Client issues `MicPacket` encoded datagrams.
-    - Action: `udp_server.rs` assesses constraints (distance, group ID). If condition blocks pass, routes via `PlayerSoundPacket` or `GroupSoundPacket` directly. Audio bleeding between different worlds is prevented via strict `Arc::ptr_eq` matching against the active game universe.
+    - Action: `udp_server.rs` assesses constraints (distance, group ID). If the checks pass, it routes via `PlayerSoundPacket` or `GroupSoundPacket`. Audio bleeding between different worlds is prevented by comparing Pumpkin world IDs.
+4. **Heartbeat and Reconnection**:
+    - Trigger: Periodic `KeepAlive` packets and the client's `KeepAlive` response.
+    - Action: Responses refresh the authenticated connection timestamp. After `10 × keep_alive` without a response, the state is marked disconnected, a fresh secret is generated, registries are resynchronized, and the client is asked to authenticate again.
 
 ### Deep Permission Integration
 
@@ -161,17 +164,20 @@ Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-vo
 | ---------------- | ----------- |
 | Dedicated UDP voice port with per-player AES-128-GCM secrets | ✅ |
 | `SecretPacket` handshake (port, codec, MTU, distance, keep-alive, groups flag, voice host, recording flag) | ✅ |
+| Compatibility-version gate plus `states → categories → groups → secret` initialization order | ✅ |
 | UDP `Authenticate` / `AuthenticateAck` with secret verification | ✅ |
 | Proximity audio with `max_voice_distance`, `whisper_distance`, `broadcast_range`, same-dimension filter | ✅ |
 | Groups: create / join / leave via GUI (`set_group`, `create_group`, `leave_group`) with password protection | ✅ |
 | Group & player-state synchronization (`add_group`, `remove_group`, `joined_group`, `state`, `states`, `update_state`) | ✅ |
 | Volume categories from configuration (`add_category`) | ✅ (no category icons) |
-| Keep-alive heartbeat sender | ✅ |
+| Keep-alive heartbeat, timeout detection, disconnected-state broadcast, and fresh-secret reconnect | ✅ |
 | `force_voice_chat` + `login_timeout` kick for unmodded clients | ✅ |
 | `allow_pings` UDP ping echo | ✅ |
 | `ConnectionCheck` / `ConnectionCheckAck` | ✅ |
 | `spectator_interaction` with positional `LocationSoundPacket` audio | ✅ |
 | Group-type routing (`NORMAL` / `OPEN` / `ISOLATED`) | ✅ |
+| Group input validation matching upstream `GROUP_REGEX` (`\p{C}`, leading whitespace, and packet length limits) | ✅ |
+| Bounds-checked TCP/UDP packet decoding and authenticated-source enforcement | ✅ |
 | Player quit state removal via `voicechat:remove_state` | ✅ |
 | `/voicechat join` by UUID or quoted name, with Pumpkin server-side suggestions | ✅ |
 | `allow_recording`, `codec`, `mtu_size`, `voice_host` passthrough to clients | ✅ |
@@ -187,15 +193,12 @@ Baseline: the upstream [Simple Voice Chat](https://modrinth.com/plugin/simple-vo
 | Area | Upstream behavior | Current behavior |
 | ---- | ------------------ | ----------------- |
 | Persistent groups | Groups flagged persistent survive becoming empty | The flag is honored during empty-group cleanup, but nothing ever creates a persistent group |
-| Secret delivery | Client sends `request_secret`; server validates the compatibility version and replies | The initial secret is pushed on join and can now be re-requested; the client compatibility version is logged but not rejected yet |
 | Permission denial feedback | Players get a cooldown-limited "no speak/listen permission" chat message | Silent debug log only |
 | Hidden groups | Hidden groups are marked so clients omit them from public listings | State and synchronization preserve the hidden flag, but no current command or API creates hidden groups |
 
 ### ❌ Not implemented (server-side)
 
 **Protocol & robustness**
-- Client compatibility-version rejection and the "incompatible version" message for `voicechat:request_secret`
-- Keep-alive timeout detection and automatic reconnect (upstream drops clients silent for `10 × keep_alive` and re-issues a fresh secret); the client `KeepAlive` (0x8) response is not tracked
 - TCP plugin-message rate limit (`tcp_rate_limit`, upstream default 16 packets/s)
 - Vanish / visibility (`canSee`) integration — hidden players are treated like normal players
 

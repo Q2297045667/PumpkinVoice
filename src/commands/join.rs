@@ -1,4 +1,6 @@
-use crate::state::StateManager;
+use crate::net::custom_payloads::VOICECHAT_COMPATIBILITY_VERSION;
+use crate::net::sync::{broadcast_player_state, broadcast_remove_group, send_joined_group};
+use crate::state::{GroupLookup, JoinGroupResult, StateManager};
 use pumpkin_plugin_api::{
     Server,
     command::{
@@ -59,8 +61,11 @@ fn suggested_group_arguments(groups: &[crate::state::Group], remaining: &str) ->
     names.into_iter().map(quote_argument).collect()
 }
 
-fn quote_argument(value: &str) -> String {
-    if value.chars().any(char::is_whitespace) {
+pub(crate) fn quote_argument(value: &str) -> String {
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character == '"' || character == '\\')
+    {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_string()
@@ -98,81 +103,60 @@ impl CommandHandler for JoinCommandExecutor {
         };
 
         let locale = player.get_locale();
+        let player_uuid = crate::util::wit_uuid_to_uuid(player.get_id());
+
+        if !self
+            .state_manager
+            .is_client_compatible_sync(&player_uuid, VOICECHAT_COMPATIBILITY_VERSION)
+        {
+            sender.send_message(crate::i18n::tr(&locale, "command.voicechat_required"));
+            return Ok(1);
+        }
+
+        if !crate::config::CONFIG.read().unwrap().enable_groups {
+            sender.send_message(crate::i18n::tr(&locale, "command.groups_disabled"));
+            return Ok(1);
+        }
 
         if !player.has_permission("pumpkin_voice:groups") {
             sender.send_message(crate::i18n::tr(&locale, "command.join.no_permission"));
             return Ok(1);
         }
 
-        let player_uuid = crate::util::wit_uuid_to_uuid(player.get_id());
-
         // Invitations contain the stable group UUID. Human-entered commands may
         // use the exact group name instead.
-        if let Some(group) = self.state_manager.get_group_by_identifier_sync(&group_name) {
-            let password_ok = match &group.password {
-                None => true,
-                Some(expected) => password.as_deref() == Some(expected.as_str()),
-            };
+        let group = match self.state_manager.get_group_by_identifier_sync(&group_name) {
+            GroupLookup::Found(group) => group,
+            GroupLookup::NotFound => {
+                sender.send_message(crate::i18n::tr(&locale, "command.join.group_not_found"));
+                return Ok(1);
+            }
+            GroupLookup::Ambiguous => {
+                sender.send_message(crate::i18n::tr(&locale, "command.join.group_ambiguous"));
+                return Ok(1);
+            }
+        };
 
-            if password_ok {
-                let old_group = self
-                    .state_manager
-                    .get_player_sync(&player_uuid)
-                    .and_then(|p| p.group);
-
-                self.state_manager
-                    .set_player_group_sync(&player_uuid, Some(group.id));
-
-                let joined_packet = crate::net::JoinedGroupPacket {
-                    group: Some(group.id),
-                    wrong_password: false,
-                };
-                if let Some(java_player) = player.as_java() {
-                    java_player
-                        .send_custom_payload("voicechat:joined_group", &joined_packet.to_bytes());
-                }
-
+        match self
+            .state_manager
+            .join_group_sync(&player_uuid, &group.id, password.as_deref())
+        {
+            JoinGroupResult::Joined(transition) => {
                 if let Some(state) = self.state_manager.get_player_sync(&player_uuid) {
-                    let bc_packet = crate::net::PlayerStatePacket {
-                        player_state: &state,
-                    };
-                    let bc_bytes = bc_packet.to_bytes();
-                    for client in server.get_all_players() {
-                        if crate::util::wit_uuid_to_uuid(client.get_id()) != player_uuid
-                            && let Some(java_player) = client.as_java()
-                        {
-                            java_player.send_custom_payload("voicechat:state", &bc_bytes);
-                        }
-                    }
+                    broadcast_player_state(&server, &self.state_manager, &state);
                 }
-
-                if let Some(old_id) = old_group
-                    && self.state_manager.remove_if_empty_sync(&old_id)
-                {
-                    let rm_packet = crate::net::RemoveGroupPacket { group: old_id };
-                    let rm_bytes = rm_packet.to_bytes();
-                    for client in server.get_all_players() {
-                        if let Some(java_player) = client.as_java() {
-                            java_player.send_custom_payload("voicechat:remove_group", &rm_bytes);
-                        }
-                    }
+                send_joined_group(&player, Some(group.id), false);
+                for removed in transition.removed_groups {
+                    broadcast_remove_group(&server, &self.state_manager, removed);
                 }
-
                 sender.send_message(crate::i18n::tr_with(
                     &locale,
                     "command.join.joined",
-                    vec![group.name.clone()],
+                    vec![group.name],
                 ));
-            } else {
-                let joined_packet = crate::net::JoinedGroupPacket {
-                    group: None,
-                    wrong_password: true,
-                };
-                if let Some(java_player) = player.as_java() {
-                    java_player
-                        .send_custom_payload("voicechat:joined_group", &joined_packet.to_bytes());
-                }
-
+            }
+            JoinGroupResult::WrongPassword => {
+                send_joined_group(&player, None, true);
                 let error_key = if password.is_none() {
                     "command.join.missing_password"
                 } else {
@@ -180,8 +164,16 @@ impl CommandHandler for JoinCommandExecutor {
                 };
                 sender.send_message(crate::i18n::tr(&locale, error_key));
             }
-        } else {
-            sender.send_message(crate::i18n::tr(&locale, "command.join.group_not_found"));
+            JoinGroupResult::GroupNotFound => {
+                send_joined_group(&player, None, false);
+                sender.send_message(crate::i18n::tr(&locale, "command.join.group_not_found"));
+            }
+            JoinGroupResult::PlayerNotFound => {
+                return Err(CommandError::CommandFailed(crate::i18n::tr(
+                    &locale,
+                    "command.player_state_missing",
+                )));
+            }
         }
 
         Ok(1)

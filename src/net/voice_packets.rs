@@ -2,7 +2,11 @@ use bytes::{Buf, BufMut};
 use uuid::Uuid;
 
 use crate::state::Secret;
-use crate::util::buf_ext::{BufExt, BufMutExt};
+use crate::util::buf_ext::BufMutExt;
+use crate::util::payload_reader::PayloadReader;
+
+pub const MAX_VOICE_CHAT_PACKET_SIZE: usize = 2048;
+pub const MAX_OPUS_PAYLOAD_SIZE: usize = 1275;
 
 #[derive(Clone)]
 pub enum VoicePacket {
@@ -44,14 +48,14 @@ pub struct AuthenticatePacket {
 
 impl AuthenticatePacket {
     #[must_use]
-    pub fn from_bytes(mut buf: impl Buf) -> Self {
-        let player_uuid = buf.get_uuid();
-        let mut secret_bytes = [0u8; 16];
-        secret_bytes.copy_from_slice(&buf.get_uuid().into_bytes()); // Secret mapping
-        Self {
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut reader = PayloadReader::new(data);
+        let player_uuid = reader.read_uuid()?;
+        let secret = Secret::from_bytes(reader.read_uuid()?.into_bytes());
+        reader.is_finished().then_some(Self {
             player_uuid,
-            secret: Secret::from_bytes(secret_bytes),
-        }
+            secret,
+        })
     }
 
     pub fn to_bytes(&self, mut buf: impl BufMut) {
@@ -80,11 +84,13 @@ pub struct PingPacket {
 
 impl PingPacket {
     #[must_use]
-    pub fn from_bytes(mut buf: impl Buf) -> Self {
-        Self {
-            id: buf.get_uuid(),
-            timestamp: buf.get_i64(),
-        }
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut reader = PayloadReader::new(data);
+        let packet = Self {
+            id: reader.read_uuid()?,
+            timestamp: reader.read_i64()?,
+        };
+        reader.is_finished().then_some(packet)
     }
 
     pub fn to_bytes(&self, mut buf: impl BufMut) {
@@ -102,15 +108,14 @@ pub struct MicPacket {
 
 impl MicPacket {
     #[must_use]
-    pub fn from_bytes(mut buf: impl Buf) -> Self {
-        let data = buf.get_byte_array();
-        let sequence_number = buf.get_i64();
-        let whispering = buf.get_u8() != 0;
-        Self {
-            data,
-            sequence_number,
-            whispering,
-        }
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut reader = PayloadReader::new(data);
+        let packet = Self {
+            data: reader.read_byte_array(MAX_OPUS_PAYLOAD_SIZE)?,
+            sequence_number: reader.read_i64()?,
+            whispering: reader.read_bool()?,
+        };
+        reader.is_finished().then_some(packet)
     }
 
     pub fn to_bytes(&self, mut buf: impl BufMut) {
@@ -254,7 +259,7 @@ impl ConnectionCheckAckPacket {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocationSoundPacket, VoicePacket};
+    use super::{AuthenticatePacket, LocationSoundPacket, MicPacket, PingPacket, VoicePacket};
     use crate::util::buf_ext::BufExt;
     use bytes::Buf;
     use uuid::Uuid;
@@ -289,5 +294,23 @@ mod tests {
         assert!(!cursor.has_remaining());
 
         assert_eq!(VoicePacket::LocationSound(packet).get_type_id(), 0x4);
+    }
+
+    #[test]
+    fn incoming_udp_packets_reject_truncation_and_trailing_bytes() {
+        assert!(AuthenticatePacket::from_bytes(&[0; 31]).is_none());
+        assert!(AuthenticatePacket::from_bytes(&[0; 33]).is_none());
+        assert!(PingPacket::from_bytes(&[0; 23]).is_none());
+        assert!(PingPacket::from_bytes(&[0; 25]).is_none());
+
+        let mut mic = vec![1, 42];
+        mic.extend_from_slice(&7_i64.to_be_bytes());
+        mic.push(1);
+        let packet = MicPacket::from_bytes(&mic).expect("valid microphone packet");
+        assert_eq!(packet.data, vec![42]);
+        assert_eq!(packet.sequence_number, 7);
+        assert!(packet.whispering);
+        mic.push(0);
+        assert!(MicPacket::from_bytes(&mic).is_none());
     }
 }

@@ -1,4 +1,7 @@
+use unicode_general_category::{GeneralCategory, get_general_category};
 use uuid::Uuid;
+
+pub const MAX_GROUP_NAME_LENGTH: usize = 24;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum GroupType {
@@ -38,7 +41,7 @@ impl GroupType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Group {
     pub id: Uuid,
     pub name: String,
@@ -48,9 +51,35 @@ pub struct Group {
     pub group_type: GroupType,
 }
 
+/// Matches Simple Voice Chat's `GROUP_REGEX`: 1-24 characters, no Unicode
+/// `Other` (`\p{C}`) characters, and no leading whitespace.
+#[must_use]
+pub fn is_valid_group_text(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    !is_unicode_other(first)
+        && !first.is_whitespace()
+        && chars.clone().count() < MAX_GROUP_NAME_LENGTH
+        && chars.all(|character| !is_unicode_other(character))
+}
+
+fn is_unicode_other(character: char) -> bool {
+    matches!(
+        get_general_category(character),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Surrogate
+            | GeneralCategory::Unassigned
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::GroupType;
+    use super::{GroupType, is_valid_group_text};
 
     #[test]
     fn group_types_round_trip_the_protocol_values() {
@@ -59,5 +88,17 @@ mod tests {
         }
         assert_eq!(GroupType::from_wire(-1), GroupType::Normal);
         assert_eq!(GroupType::from_wire(3), GroupType::Normal);
+    }
+
+    #[test]
+    fn group_text_validation_matches_the_upstream_limits() {
+        assert!(is_valid_group_text("Open group"));
+        assert!(is_valid_group_text(&"a".repeat(24)));
+        assert!(!is_valid_group_text(""));
+        assert!(!is_valid_group_text(" leading"));
+        assert!(!is_valid_group_text("line\nbreak"));
+        assert!(!is_valid_group_text("zero\u{200b}width"));
+        assert!(!is_valid_group_text("private\u{e000}use"));
+        assert!(!is_valid_group_text(&"a".repeat(25)));
     }
 }

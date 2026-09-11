@@ -19,14 +19,14 @@ use pumpkin_plugin_api::{
 use std::sync::{Arc, OnceLock};
 
 pub struct VoiceChatPlugin {
-    state_manager: Arc<StateManager>,
+    state_manager: OnceLock<Arc<StateManager>>,
     udp_server: OnceLock<Arc<UdpServer>>,
 }
 
 impl Plugin for VoiceChatPlugin {
     fn new() -> Self {
         Self {
-            state_manager: Arc::new(StateManager::new()),
+            state_manager: OnceLock::new(),
             udp_server: OnceLock::new(),
         }
     }
@@ -62,6 +62,11 @@ impl Plugin for VoiceChatPlugin {
         // overrides, then use the configured server language below.
         crate::i18n::init(&context.get_data_folder());
         let locale = crate::i18n::default_locale();
+        let config = crate::config::CONFIG.read().unwrap().clone();
+        let state_manager = self
+            .state_manager
+            .get_or_init(|| Arc::new(StateManager::from_config(&config)))
+            .clone();
 
         tracing::info!("{}", crate::i18n::translate_str(locale, "plugin.loading"));
 
@@ -98,8 +103,6 @@ impl Plugin for VoiceChatPlugin {
             children: vec![],
         });
 
-        let state_manager = self.state_manager.clone();
-
         // Register events
         context.register_event_handler::<PlayerJoinEvent, _>(
             JoinHandler {
@@ -124,10 +127,6 @@ impl Plugin for VoiceChatPlugin {
             EventPriority::Normal,
             true,
         )?;
-
-        // Host API calls may synchronously re-enter the plugin. Keep the configuration
-        // lock out of those calls by taking an owned snapshot first.
-        let config = crate::config::CONFIG.read().unwrap().clone();
 
         // Initialize UDP Server
         let port = if config.port == -1 {
@@ -157,9 +156,14 @@ impl Plugin for VoiceChatPlugin {
                 });
 
                 let udp_ka = udp_arc.clone();
-                context.schedule_repeating_task(20, 20, move |_server| {
-                    udp_ka.send_keep_alives();
-                });
+                let keep_alive_ticks = (config.keep_alive.max(50) as u64).div_ceil(50);
+                context.schedule_repeating_task(
+                    keep_alive_ticks,
+                    keep_alive_ticks,
+                    move |server| {
+                        udp_ka.send_keep_alives(&server);
+                    },
+                );
 
                 tracing::info!(
                     "{}",

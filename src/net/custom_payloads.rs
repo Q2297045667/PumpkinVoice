@@ -1,13 +1,28 @@
 use bytes::{BufMut, BytesMut};
 use uuid::Uuid;
 
-use crate::state::Secret;
+use crate::state::{GroupType, Secret};
 use crate::util::buf_ext::BufMutExt;
+use crate::util::payload_reader::PayloadReader;
 
 pub const SECRET_CHANNEL: &str = "voicechat:secret";
 pub const REQUEST_SECRET_CHANNEL: &str = "voicechat:request_secret";
+pub const UPDATE_STATE_CHANNEL: &str = "voicechat:update_state";
+pub const CREATE_GROUP_CHANNEL: &str = "voicechat:create_group";
+pub const SET_GROUP_CHANNEL: &str = "voicechat:set_group";
+pub const LEAVE_GROUP_CHANNEL: &str = "voicechat:leave_group";
+pub const STATE_CHANNEL: &str = "voicechat:state";
+pub const STATES_CHANNEL: &str = "voicechat:states";
+pub const ADD_GROUP_CHANNEL: &str = "voicechat:add_group";
+pub const REMOVE_GROUP_CHANNEL: &str = "voicechat:remove_group";
+pub const JOINED_GROUP_CHANNEL: &str = "voicechat:joined_group";
+pub const ADD_CATEGORY_CHANNEL: &str = "voicechat:add_category";
 pub const REMOVE_STATE_CHANNEL: &str = "voicechat:remove_state";
+pub const VOICECHAT_COMPATIBILITY_VERSION: i32 = 20;
+pub const VOICECHAT_COMPATIBLE_RELEASE: &str = "2.6.x";
 pub const PLUGIN_MESSAGE_PORT: i32 = 24454;
+pub const MAX_GROUP_NAME_LENGTH: usize = 24;
+const MAX_JOIN_PASSWORD_LENGTH: usize = 512;
 
 pub struct SecretPacket {
     pub secret: Secret,
@@ -81,22 +96,80 @@ pub struct RequestSecretPacket {
 impl RequestSecretPacket {
     #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
-        Some(Self {
-            compatibility_version: i32::from_be_bytes(bytes),
-        })
+        let mut reader = PayloadReader::new(data);
+        let packet = Self {
+            compatibility_version: reader.read_i32()?,
+        };
+        reader.is_finished().then_some(packet)
     }
 }
 
 pub struct CreateGroupPacket {
     pub name: String,
     pub password: Option<String>,
-    pub group_type: i16,
+    pub group_type: GroupType,
+}
+
+impl CreateGroupPacket {
+    #[must_use]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut reader = PayloadReader::new(data);
+        let name = reader.read_string(MAX_GROUP_NAME_LENGTH)?;
+        let password = if reader.read_bool()? {
+            Some(reader.read_string(MAX_GROUP_NAME_LENGTH)?)
+        } else {
+            None
+        };
+        let group_type = GroupType::from_wire(reader.read_i16()?);
+        reader.is_finished().then_some(Self {
+            name,
+            password,
+            group_type,
+        })
+    }
 }
 
 pub struct JoinGroupPacket {
     pub group: Uuid,
     pub password: Option<String>,
+}
+
+impl JoinGroupPacket {
+    #[must_use]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut reader = PayloadReader::new(data);
+        let group = reader.read_uuid()?;
+        let password = if reader.read_bool()? {
+            Some(reader.read_string(MAX_JOIN_PASSWORD_LENGTH)?)
+        } else {
+            None
+        };
+        reader.is_finished().then_some(Self { group, password })
+    }
+}
+
+pub struct UpdateStatePacket {
+    pub disabled: bool,
+}
+
+impl UpdateStatePacket {
+    #[must_use]
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut reader = PayloadReader::new(data);
+        let packet = Self {
+            disabled: reader.read_bool()?,
+        };
+        reader.is_finished().then_some(packet)
+    }
+}
+
+pub struct LeaveGroupPacket;
+
+impl LeaveGroupPacket {
+    #[must_use]
+    pub const fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.is_empty() { Some(Self) } else { None }
+    }
 }
 
 pub struct AddGroupPacket<'a> {
@@ -269,10 +342,15 @@ impl<'a> PlayerStatesPacket<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddGroupPacket, PLUGIN_MESSAGE_PORT, RemovePlayerStatePacket, RequestSecretPacket,
-        SecretPacket,
+        AddGroupPacket, CreateGroupPacket, JoinGroupPacket, LeaveGroupPacket, PLUGIN_MESSAGE_PORT,
+        RemovePlayerStatePacket, RequestSecretPacket, SecretPacket, UpdateStatePacket,
     };
-    use crate::{config::VoicechatConfig, state::Secret};
+    use crate::{
+        config::VoicechatConfig,
+        state::{GroupType, Secret},
+        util::buf_ext::BufMutExt,
+    };
+    use bytes::BufMut;
     use uuid::Uuid;
 
     #[test]
@@ -284,6 +362,46 @@ mod tests {
             20
         );
         assert!(RequestSecretPacket::from_bytes(&[0, 0, 0]).is_none());
+        assert!(RequestSecretPacket::from_bytes(&[0, 0, 0, 20, 0]).is_none());
+    }
+
+    #[test]
+    fn incoming_group_packets_match_the_bukkit_wire_format() {
+        let group_id = Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
+
+        let mut create = Vec::new();
+        create.put_string("Builders Lounge");
+        create.put_u8(1);
+        create.put_string("secret");
+        create.put_i16(1);
+        let parsed = CreateGroupPacket::from_bytes(&create).expect("packet should decode");
+        assert_eq!(parsed.name, "Builders Lounge");
+        assert_eq!(parsed.password.as_deref(), Some("secret"));
+        assert_eq!(parsed.group_type, GroupType::Open);
+
+        let mut join = Vec::new();
+        join.put_uuid(group_id);
+        join.put_u8(0);
+        let parsed = JoinGroupPacket::from_bytes(&join).expect("packet should decode");
+        assert_eq!(parsed.group, group_id);
+        assert_eq!(parsed.password, None);
+
+        assert!(UpdateStatePacket::from_bytes(&[1]).is_some_and(|packet| packet.disabled));
+        assert!(UpdateStatePacket::from_bytes(&[]).is_none());
+        assert!(LeaveGroupPacket::from_bytes(&[]).is_some());
+        assert!(LeaveGroupPacket::from_bytes(&[0]).is_none());
+    }
+
+    #[test]
+    fn malformed_group_packets_are_rejected() {
+        assert!(CreateGroupPacket::from_bytes(&[5, b'a']).is_none());
+        assert!(JoinGroupPacket::from_bytes(&[0; 16]).is_none());
+
+        let mut oversized = Vec::new();
+        oversized.put_string(&"a".repeat(25));
+        oversized.put_u8(0);
+        oversized.put_i16(0);
+        assert!(CreateGroupPacket::from_bytes(&oversized).is_none());
     }
 
     #[test]

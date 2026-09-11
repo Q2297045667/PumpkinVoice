@@ -364,6 +364,7 @@ mod tests {
         const PREFIXES: &[&str] = &[
             "plugin.",
             "command.",
+            "message.",
             "kick.",
             "permission.",
             "category.",
