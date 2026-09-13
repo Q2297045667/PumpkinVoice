@@ -41,6 +41,7 @@ pub struct StateManager {
     groups: RwLock<HashMap<Uuid, Group>>,
     categories: RwLock<HashMap<String, crate::net::VolumeCategory>>,
     pub rate_limiter: PacketRateLimiter,
+    pub tcp_rate_limiter: PacketRateLimiter,
 }
 
 impl StateManager {
@@ -69,6 +70,7 @@ impl StateManager {
             groups: RwLock::new(HashMap::new()),
             categories: RwLock::new(cats),
             rate_limiter: PacketRateLimiter::new(config.max_packets_per_second),
+            tcp_rate_limiter: PacketRateLimiter::new(config.tcp_rate_limit),
         }
     }
 

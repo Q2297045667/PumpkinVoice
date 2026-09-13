@@ -10,11 +10,11 @@ license = "GPL-3.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Pumpkin plugin SDK. Pinned to the 2026-09-11 master revision, which carries
+# Pumpkin plugin SDK. Pinned to the 2026-09-14 master revision, which carries
 # the `pumpkin:plugin@0.1.0` WIT world (pumpkin-plugin-wit @ 1ad73fff).
 # The API crate owns the `wit-bindgen::generate!` + `export!` component glue,
 # so this crate does not need a direct wit-bindgen dependency.
-pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin.git", rev = "2c49af7acb9c62a62b5f22251dc2925f00c4edd8", package = "pumpkin-plugin-api" }
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin.git", rev = "56088d1c5750b43a4e096d61ff38357df32ca99b", package = "pumpkin-plugin-api" }
 
 # WASM compatible logging
 tracing = "0.1"

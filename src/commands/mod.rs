@@ -5,9 +5,11 @@ use pumpkin_plugin_api::{
 };
 use std::sync::Arc;
 
+pub mod help;
 pub mod invite;
 pub mod join;
 pub mod leave;
+pub mod status;
 
 pub const NAMES: &[&str] = &["voicechat", "vc"];
 
@@ -24,6 +26,7 @@ pub fn init_command_tree(state_manager: Arc<StateManager>) -> Command {
     let group_name_suggestions = join::GroupNameSuggestionProvider {
         state_manager: state_manager.clone(),
     };
+    let status_executor = status::StatusCommandExecutor { state_manager };
 
     let names_vec: Vec<String> = NAMES.iter().map(|s| s.to_string()).collect();
 
@@ -47,6 +50,9 @@ pub fn init_command_tree(state_manager: Arc<StateManager>) -> Command {
         .then(CommandNode::argument("target", &ArgumentType::Players).execute(invite_executor));
 
     Command::new(&names_vec, &description)
+        .execute(help::HelpCommandExecutor)
+        .then(CommandNode::literal("help").execute(help::HelpCommandExecutor))
+        .then(CommandNode::literal("status").execute(status_executor))
         .then(join_node)
         .then(leave_node)
         .then(invite_node)

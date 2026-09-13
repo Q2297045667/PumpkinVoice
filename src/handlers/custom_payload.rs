@@ -27,8 +27,17 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
         server: Server,
         event: EventData<PlayerCustomPayloadEvent>,
     ) -> EventData<PlayerCustomPayloadEvent> {
+        // Other mods share this event. Only voice chat traffic consumes our
+        // TCP budget, including repeated request_secret packets.
+        if !is_voicechat_channel(&event.channel) {
+            return event;
+        }
         let player = &event.player;
         let uuid = crate::util::wit_uuid_to_uuid(player.get_id());
+
+        if !self.state_manager.tcp_rate_limiter.allow(uuid) {
+            return event;
+        }
 
         // PlayerJoin normally creates this state. Keeping this idempotent makes
         // the handshake robust if a host dispatches the custom payload first.
@@ -54,6 +63,23 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
         }
 
         event
+    }
+}
+
+fn is_voicechat_channel(channel: &str) -> bool {
+    matches!(channel, REQUEST_SECRET_CHANNEL | UPDATE_STATE_CHANNEL | SET_GROUP_CHANNEL | CREATE_GROUP_CHANNEL | LEAVE_GROUP_CHANNEL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_voicechat_channel;
+
+    #[test]
+    fn tcp_budget_only_applies_to_supported_voicechat_channels() {
+        assert!(is_voicechat_channel("voicechat:request_secret"));
+        assert!(is_voicechat_channel("voicechat:create_group"));
+        assert!(!is_voicechat_channel("minecraft:brand"));
+        assert!(!is_voicechat_channel("another_mod:request_secret"));
     }
 }
 

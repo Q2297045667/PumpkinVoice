@@ -116,12 +116,11 @@ pub fn translate_str_with(locale: &str, key: &str, args: &[String]) -> String {
 /// Loads `lang/<locale>.json` overrides from the plugin data folder.
 fn load_folder_overrides(data_folder: &str) {
     let normalized = data_folder.replace('\\', "/");
-    let cleaned = normalized.trim_matches('/');
-    if cleaned.is_empty() {
+    if normalized.is_empty() {
         return;
     }
 
-    let dir = Path::new(cleaned).join("lang");
+    let dir = Path::new(&normalized).join("lang");
     let Ok(entries) = fs::read_dir(&dir) else {
         return; // No overrides folder: perfectly normal.
     };
@@ -422,8 +421,8 @@ mod tests {
 
     #[test]
     fn runtime_folder_scanner_accepts_a_new_locale_without_registration() {
-        let root =
-            PathBuf::from("target").join(format!("i18n-runtime-test-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("i18n-runtime-test-{}", uuid::Uuid::new_v4()));
         let lang_dir = root.join("lang");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&lang_dir).expect("test lang directory should be created");

@@ -26,12 +26,12 @@ This plugin implements the backend compatibility needed to host the [Simple Voic
 
 | Component | Pinned version |
 | --------- | -------------- |
-| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `2c49af7acb9c62a62b5f22251dc2925f00c4edd8` (verified 2026-09-11) |
+| `pumpkin-plugin-api` | `0.1.0+26.2-26.45` — Pumpkin `master` rev `4de17448c484ff667e278066663bb45212028348` (verified 2026-09-12) |
 | WIT interface | `pumpkin:plugin@0.1.0` (`pumpkin-plugin-wit` rev `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`) |
 | WASM target | `wasm32-wasip2` |
 | Crypto / support crates | `aes-gcm` 0.11, `rand` 0.10, `uuid` 1.26, `bytes` 1.12, `serde` 1.0, `toml` 1.1, `tracing` 0.1, `unicode-general-category` 1.1 |
 
-The API is pinned to the Pumpkin `master` tip verified on 2026-09-11. That Pumpkin revision points its `pumpkin-plugin-wit` submodule at `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`, which is also the current WIT repository `master` tip, so the generated guest bindings match the interface consumed by that server revision. `wit-bindgen` is **not** a direct dependency here: the SDK crate owns the `wit_bindgen::generate!` / `export!` component glue.
+The API is pinned to the Pumpkin `master` tip verified on 2026-09-12. That Pumpkin revision points its `pumpkin-plugin-wit` submodule at `1ad73fff1e0a9e21b99255816df5f99f6260c1b9`, which is also the current WIT repository `master` tip, so the generated guest bindings match the interface consumed by that server revision. `wit-bindgen` is **not** a direct dependency here: the SDK crate owns the `wit_bindgen::generate!` / `export!` component glue.
 
 ---
 

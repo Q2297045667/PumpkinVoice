@@ -17,6 +17,11 @@ pub struct UdpServer {
     socket: UdpSocket,
 }
 
+// Bound each scheduler callback so a busy or faulty socket cannot monopolize
+// the plugin executor and delay keep-alives, commands, and player events.
+const MAX_DATAGRAMS_PER_POLL: usize = 256;
+const PING_V1: Uuid = Uuid::from_u128(0x58bc9ae9_c7a8_45e4_a11c_efbb67199425);
+
 impl UdpServer {
     pub fn new(state_manager: Arc<StateManager>, addr: &str) -> Result<Self, std::io::Error> {
         let socket = UdpSocket::bind(addr)?;
@@ -37,7 +42,7 @@ impl UdpServer {
 
     pub fn poll(&self, server: &Server) {
         let mut buf = [0u8; 4096];
-        loop {
+        for _ in 0..MAX_DATAGRAMS_PER_POLL {
             match self.socket.recv_from(&mut buf) {
                 Ok((len, src)) => {
                     self.handle_packet(server, &buf[..len], src);
@@ -46,11 +51,8 @@ impl UdpServer {
                     break;
                 }
                 Err(ref e) => {
-                    let msg = e.to_string();
                     if e.kind() == std::io::ErrorKind::ConnectionReset
                         || e.kind() == std::io::ErrorKind::Interrupted
-                        || msg.contains("reset")
-                        || msg.contains("15")
                     {
                         continue;
                     }
@@ -135,6 +137,13 @@ impl UdpServer {
         let mut uuid_bytes = [0u8; 16];
         uuid_bytes.copy_from_slice(&data[1..17]);
         let player_id = Uuid::from_bytes(uuid_bytes);
+
+        if allow_pings && player_id == PING_V1 {
+            if let Some(response) = discovery_ping_response(&data[17..]) {
+                let _ = self.socket.send_to(&response, src);
+            }
+            return;
+        }
 
         if let Some(player_state) = self.state_manager.get_player_sync(&player_id) {
             let mut payload_reader = PayloadReader::new(&data[17..]);
@@ -237,13 +246,7 @@ impl UdpServer {
                                 .and_then(|group_id| self.state_manager.get_group_sync(&group_id));
 
                             if let Some(group_id) = player_state.group {
-                                let group_packet = crate::net::voice_packets::GroupSoundPacket {
-                                    channel_id: group_id,
-                                    sender: player_id,
-                                    data: mic_packet.data.clone(),
-                                    sequence_number: mic_packet.sequence_number,
-                                    category: None,
-                                };
+                                let group_packet = group_sound_packet(player_id, &mic_packet);
                                 for receiver in &all_players {
                                     if receiver.uuid == player_id
                                         || !receiver_accepts_audio(
@@ -280,9 +283,7 @@ impl UdpServer {
                                 }
                             }
 
-                            if should_route_proximity(sender_group.as_ref())
-                                && (!is_spectator || spectator_interaction)
-                            {
+                            if should_route_proximity(sender_group.as_ref()) {
                                 let pos_a = sender_pl.get_position();
                                 let distance_config = if mic_packet.whispering {
                                     whisper_distance
@@ -298,7 +299,7 @@ impl UdpServer {
                                 .max(distance_config);
 
                                 let distance_sq = broadcast_range.powi(2);
-                                let proximity_packet = if is_spectator {
+                                let proximity_packet = if use_location_audio(is_spectator, spectator_interaction) {
                                     let eye_pos = sender_pl.as_entity().get_eye_position();
                                     VoicePacket::LocationSound(
                                         crate::net::voice_packets::LocationSoundPacket {
@@ -408,18 +409,9 @@ impl UdpServer {
                             }
                         }
                         0x7 => {
-                            if allow_pings
-                                && player_state.socket_addr == Some(src)
-                                && !player_state.disconnected
-                                && let Some(packet) = PingPacket::from_bytes(packet_data)
-                            {
-                                let _ = send_packet(
-                                    &self.socket,
-                                    src,
-                                    VoicePacket::Ping(packet),
-                                    &player_state.secret,
-                                );
-                            }
+                            // This is a pong to a server-initiated test, not an
+                            // echo request. Echoing it makes the client send it
+                            // back forever. There is no pending admin test yet.
                         }
                         0x8 => {
                             if !packet_data.is_empty()
@@ -497,8 +489,37 @@ impl UdpServer {
     }
 }
 
+fn discovery_ping_response(data: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = PayloadReader::new(data);
+    let response = reader.read_byte_array(24)?;
+    if !reader.is_finished() || PingPacket::from_bytes(&response).is_none() {
+        return None;
+    }
+    Some(response)
+}
+
+fn use_location_audio(is_spectator: bool, spectator_interaction: bool) -> bool {
+    is_spectator && spectator_interaction
+}
+
 fn receiver_accepts_audio(disabled: bool, disconnected: bool) -> bool {
     !disabled && !disconnected
+}
+
+fn group_sound_packet(
+    sender: Uuid,
+    microphone: &MicPacket,
+) -> crate::net::voice_packets::GroupSoundPacket {
+    // Simple Voice Chat creates one playback channel per speaker. Using the
+    // group UUID here would merge every speaker into one channel, so their
+    // independent sequence numbers would make valid frames look stale.
+    crate::net::voice_packets::GroupSoundPacket {
+        channel_id: sender,
+        sender,
+        data: microphone.data.clone(),
+        sequence_number: microphone.sequence_number,
+        category: None,
+    }
 }
 
 fn should_route_proximity(sender_group: Option<&crate::state::Group>) -> bool {
@@ -519,7 +540,11 @@ fn should_receive_proximity(
 
 #[cfg(test)]
 mod tests {
-    use super::{receiver_accepts_audio, should_receive_proximity, should_route_proximity};
+    use super::{
+        discovery_ping_response, group_sound_packet, receiver_accepts_audio, should_receive_proximity,
+        should_route_proximity, use_location_audio,
+    };
+    use crate::net::voice_packets::MicPacket;
     use crate::state::{Group, GroupType};
     use uuid::Uuid;
 
@@ -548,6 +573,44 @@ mod tests {
         assert!(!receiver_accepts_audio(true, false));
         assert!(!receiver_accepts_audio(false, true));
         assert!(!receiver_accepts_audio(true, true));
+    }
+
+    #[test]
+    fn group_audio_uses_a_separate_channel_for_each_speaker() {
+        let sender = Uuid::new_v4();
+        let packet = group_sound_packet(
+            sender,
+            &MicPacket {
+                data: vec![1, 2, 3],
+                sequence_number: 42,
+                whispering: false,
+            },
+        );
+
+        assert_eq!(packet.channel_id, sender);
+        assert_eq!(packet.sender, sender);
+        assert_eq!(packet.data, vec![1, 2, 3]);
+        assert_eq!(packet.sequence_number, 42);
+    }
+
+    #[test]
+    fn discovery_ping_matches_the_unencrypted_upstream_probe() {
+        // PingHandler replies with just the UUID and timestamp (24 bytes).
+        let mut request = vec![24];
+        request.extend_from_slice(Uuid::from_u128(42).as_bytes());
+        request.extend_from_slice(&123456789_i64.to_be_bytes());
+        assert_eq!(discovery_ping_response(&request), Some(request[1..].to_vec()));
+        assert!(discovery_ping_response(&request[..24]).is_none());
+        request.push(0);
+        assert!(discovery_ping_response(&request).is_none());
+        assert!(discovery_ping_response(&[0x80]).is_none());
+    }
+
+    #[test]
+    fn spectator_setting_selects_packet_type_instead_of_muting_sender() {
+        assert!(!use_location_audio(true, false));
+        assert!(use_location_audio(true, true));
+        assert!(!use_location_audio(false, true));
     }
 
     #[test]

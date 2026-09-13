@@ -22,6 +22,7 @@ impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
         let uuid = crate::util::wit_uuid_to_uuid(event.player.get_id());
 
         self.state_manager.rate_limiter.on_player_logged_out(uuid);
+        self.state_manager.tcp_rate_limiter.on_player_logged_out(uuid);
         self.state_manager.remove_player_sync(&uuid);
         broadcast_remove_state(&server, &self.state_manager, uuid);
 
