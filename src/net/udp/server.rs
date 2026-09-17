@@ -1,20 +1,23 @@
 use std::net::UdpSocket;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tracing::{error, info};
 use uuid::Uuid;
 
-use super::crypto::send_packet;
+use super::crypto::{encode_packet, send_encoded_packet, send_packet};
 use crate::net::voice_packets::{
     AuthenticateAckPacket, AuthenticatePacket, ConnectionCheckAckPacket,
     MAX_VOICE_CHAT_PACKET_SIZE, MicPacket, PingPacket, VoicePacket,
 };
 use crate::state::StateManager;
 use crate::util::payload_reader::PayloadReader;
-use pumpkin_plugin_api::Server;
+use crate::util::permission_notice::{PermissionNoticeCooldown, VoicePermission};
+use pumpkin_plugin_api::{Player, Server};
 
 pub struct UdpServer {
     state_manager: Arc<StateManager>,
     socket: UdpSocket,
+    permission_notices: Mutex<PermissionNoticeCooldown>,
 }
 
 // Bound each scheduler callback so a busy or faulty socket cannot monopolize
@@ -37,7 +40,28 @@ impl UdpServer {
         Ok(Self {
             state_manager,
             socket,
+            permission_notices: Mutex::new(PermissionNoticeCooldown::default()),
         })
+    }
+
+    fn has_voice_permission(&self, player: &Player, permission: VoicePermission) -> bool {
+        if player.has_permission(permission.permission()) {
+            return true;
+        }
+        let id = crate::util::wit_uuid_to_uuid(player.get_id());
+        let notify =
+            self.permission_notices
+                .lock()
+                .unwrap()
+                .should_notify(id, permission, Instant::now());
+        // The cache guard has been dropped: host calls can re-enter the plugin.
+        if notify {
+            player.send_system_message(
+                crate::i18n::tr(&player.get_locale(), permission.message_key()),
+                true,
+            );
+        }
+        false
     }
 
     pub fn poll(&self, server: &Server) {
@@ -92,7 +116,7 @@ impl UdpServer {
                     crate::net::custom_payloads::VOICECHAT_COMPATIBILITY_VERSION,
                 )
             {
-                crate::net::sync::send_full_sync(&player, &self.state_manager);
+                crate::net::sync::send_full_sync(&player, server, &self.state_manager);
                 crate::net::sync::send_secret(&player, &self.state_manager);
             }
         }
@@ -113,6 +137,7 @@ impl UdpServer {
         // synchronously re-enter the plugin, so no configuration lock can span them.
         let (
             spectator_interaction,
+            spectator_player_possession,
             whisper_distance,
             max_voice_distance,
             broadcast_range,
@@ -121,6 +146,7 @@ impl UdpServer {
             let config = crate::config::CONFIG.read().unwrap();
             (
                 config.spectator_interaction,
+                config.spectator_player_possession,
                 config.whisper_distance,
                 config.max_voice_distance,
                 config.broadcast_range,
@@ -146,8 +172,13 @@ impl UdpServer {
         }
 
         if let Some(player_state) = self.state_manager.get_player_sync(&player_id) {
+            if player_state.compatibility_version
+                != Some(crate::net::custom_payloads::VOICECHAT_COMPATIBILITY_VERSION)
+            {
+                return;
+            }
             let mut payload_reader = PayloadReader::new(&data[17..]);
-            let Some(payload_bytes) = payload_reader.read_byte_array(MAX_VOICE_CHAT_PACKET_SIZE)
+            let Some(payload_bytes) = payload_reader.read_byte_slice(MAX_VOICE_CHAT_PACKET_SIZE)
             else {
                 tracing::debug!(
                     "{}",
@@ -171,7 +202,7 @@ impl UdpServer {
                 return;
             }
 
-            match player_state.secret.decrypt(&payload_bytes) {
+            match player_state.secret.decrypt(payload_bytes) {
                 Ok(decrypted) => {
                     if decrypted.is_empty() {
                         return;
@@ -204,8 +235,6 @@ impl UdpServer {
                                     ],
                                 )
                             );
-                            let all_players = self.state_manager.get_all_players_sync();
-
                             let sender_pl = match server
                                 .get_player_by_uuid(crate::util::uuid_to_wit_uuid(player_id))
                             {
@@ -223,7 +252,7 @@ impl UdpServer {
                                 }
                             };
 
-                            if !sender_pl.has_permission("pumpkin_voice:speak") {
+                            if !self.has_voice_permission(&sender_pl, VoicePermission::Speak) {
                                 tracing::debug!(
                                     "{}",
                                     crate::i18n::translate_str_with(
@@ -244,29 +273,26 @@ impl UdpServer {
                             let sender_group = player_state
                                 .group
                                 .and_then(|group_id| self.state_manager.get_group_sync(&group_id));
+                            let audio_targets =
+                                self.state_manager.get_audio_targets_sync(player_id);
 
                             if let Some(group_id) = player_state.group {
-                                let group_packet = group_sound_packet(player_id, &mic_packet);
-                                for receiver in &all_players {
-                                    if receiver.uuid == player_id
-                                        || !receiver_accepts_audio(
-                                            receiver.disabled,
-                                            receiver.disconnected,
-                                        )
-                                    {
-                                        continue;
-                                    }
+                                let group_packet = encode_packet(&VoicePacket::GroupSound(
+                                    group_sound_packet(player_id, &mic_packet),
+                                ));
+                                for receiver in &audio_targets {
                                     if receiver.group == Some(group_id)
-                                        && let Some(addr) = receiver.socket_addr
                                         && let Some(recv_pl) = server.get_player_by_uuid(
                                             crate::util::uuid_to_wit_uuid(receiver.uuid),
                                         )
                                     {
-                                        if recv_pl.has_permission("pumpkin_voice:listen") {
-                                            let _ = send_packet(
+                                        if self
+                                            .has_voice_permission(&recv_pl, VoicePermission::Listen)
+                                        {
+                                            let _ = send_encoded_packet(
                                                 &self.socket,
-                                                addr,
-                                                VoicePacket::GroupSound(group_packet.clone()),
+                                                receiver.socket_addr,
+                                                &group_packet,
                                                 &receiver.secret,
                                             );
                                         } else {
@@ -284,6 +310,44 @@ impl UdpServer {
                             }
 
                             if should_route_proximity(sender_group.as_ref()) {
+                                if is_spectator && spectator_player_possession {
+                                    let camera = sender_pl.get_camera_entity_id();
+                                    if let Some(target) =
+                                        server.get_all_players().into_iter().find(|p| {
+                                            p.as_entity().get_id() == camera
+                                                && crate::util::wit_uuid_to_uuid(p.get_id())
+                                                    != player_id
+                                        })
+                                    {
+                                        let target_id =
+                                            crate::util::wit_uuid_to_uuid(target.get_id());
+                                        if let Some(receiver) =
+                                            self.state_manager.get_player_sync(&target_id)
+                                            && receiver_accepts_audio(
+                                                receiver.disabled,
+                                                receiver.disconnected,
+                                            )
+                                            && let Some(addr) = receiver.socket_addr
+                                            && self.has_voice_permission(
+                                                &target,
+                                                VoicePermission::Listen,
+                                            )
+                                        {
+                                            let _ = send_packet(
+                                                &self.socket,
+                                                addr,
+                                                VoicePacket::GroupSound(group_sound_packet(
+                                                    player_id,
+                                                    &mic_packet,
+                                                )),
+                                                &receiver.secret,
+                                            );
+                                        }
+                                        // Upstream does not fall back to proximity if the
+                                        // possessed player is muted or has no voice connection.
+                                        return;
+                                    }
+                                }
                                 let pos_a = sender_pl.get_position();
                                 let distance_config = if mic_packet.whispering {
                                     whisper_distance
@@ -299,71 +363,69 @@ impl UdpServer {
                                 .max(distance_config);
 
                                 let distance_sq = broadcast_range.powi(2);
-                                let proximity_packet = if use_location_audio(is_spectator, spectator_interaction) {
-                                    let eye_pos = sender_pl.as_entity().get_eye_position();
-                                    VoicePacket::LocationSound(
-                                        crate::net::voice_packets::LocationSoundPacket {
-                                            channel_id: player_id,
-                                            sender: player_id,
-                                            location: [eye_pos.0, eye_pos.1, eye_pos.2],
-                                            data: mic_packet.data.clone(),
-                                            sequence_number: mic_packet.sequence_number,
-                                            distance: distance_config as f32,
-                                            category: None,
-                                        },
-                                    )
-                                } else {
-                                    VoicePacket::PlayerSound(
-                                        crate::net::voice_packets::PlayerSoundPacket {
-                                            channel_id: player_id,
-                                            sender: player_id,
-                                            data: mic_packet.data.clone(),
-                                            sequence_number: mic_packet.sequence_number,
-                                            distance: distance_config as f32,
-                                            whispering: mic_packet.whispering,
-                                            category: None,
-                                        },
-                                    )
-                                };
-
-                                for receiver in &all_players {
-                                    let receiver_group_type = receiver
-                                        .group
-                                        .and_then(|group_id| {
-                                            self.state_manager.get_group_sync(&group_id)
-                                        })
-                                        .map(|group| group.group_type);
-                                    if receiver.uuid == player_id
-                                        || !should_receive_proximity(
-                                            player_state.group,
-                                            receiver.group,
-                                            receiver_group_type,
-                                            receiver.disabled,
-                                            receiver.disconnected,
+                                let proximity_packet =
+                                    if use_location_audio(is_spectator, spectator_interaction) {
+                                        let eye_pos = sender_pl.as_entity().get_eye_position();
+                                        VoicePacket::LocationSound(
+                                            crate::net::voice_packets::LocationSoundPacket {
+                                                channel_id: player_id,
+                                                sender: player_id,
+                                                location: [eye_pos.0, eye_pos.1, eye_pos.2],
+                                                data: mic_packet.data.clone(),
+                                                sequence_number: mic_packet.sequence_number,
+                                                distance: distance_config as f32,
+                                                category: None,
+                                            },
                                         )
-                                    {
+                                    } else {
+                                        VoicePacket::PlayerSound(
+                                            crate::net::voice_packets::PlayerSoundPacket {
+                                                channel_id: player_id,
+                                                sender: player_id,
+                                                data: mic_packet.data.clone(),
+                                                sequence_number: mic_packet.sequence_number,
+                                                distance: distance_config as f32,
+                                                whispering: mic_packet.whispering,
+                                                category: None,
+                                            },
+                                        )
+                                    };
+
+                                let proximity_packet = encode_packet(&proximity_packet);
+                                let sender_world = sender_pl.get_world().get_id();
+                                for receiver in &audio_targets {
+                                    // Eligibility (including disabled/disconnected)
+                                    // was filtered in the same state snapshot.
+                                    if !should_receive_proximity(
+                                        player_state.group,
+                                        receiver.group,
+                                        receiver.group_type,
+                                        false,
+                                        false,
+                                    ) {
                                         continue;
                                     }
-                                    if let Some(addr) = receiver.socket_addr
-                                        && let Some(recv_pl) = server.get_player_by_uuid(
-                                            crate::util::uuid_to_wit_uuid(receiver.uuid),
-                                        )
-                                    {
+                                    if let Some(recv_pl) = server.get_player_by_uuid(
+                                        crate::util::uuid_to_wit_uuid(receiver.uuid),
+                                    ) {
                                         // Same world check
-                                        if sender_pl.get_world().get_id()
-                                            == recv_pl.get_world().get_id()
-                                        {
-                                            if recv_pl.has_permission("pumpkin_voice:listen") {
-                                                let pos_b = recv_pl.get_position();
-                                                let dist = (pos_a.0 - pos_b.0).powi(2)
-                                                    + (pos_a.1 - pos_b.1).powi(2)
-                                                    + (pos_a.2 - pos_b.2).powi(2);
-
+                                        if sender_world == recv_pl.get_world().get_id() {
+                                            let pos_b = recv_pl.get_position();
+                                            let dist = (pos_a.0 - pos_b.0).powi(2)
+                                                + (pos_a.1 - pos_b.1).powi(2)
+                                                + (pos_a.2 - pos_b.2).powi(2);
+                                            if dist > distance_sq {
+                                                continue;
+                                            }
+                                            if self.has_voice_permission(
+                                                &recv_pl,
+                                                VoicePermission::Listen,
+                                            ) {
                                                 if dist <= distance_sq {
-                                                    let _ = send_packet(
+                                                    let _ = send_encoded_packet(
                                                         &self.socket,
-                                                        addr,
-                                                        proximity_packet.clone(),
+                                                        receiver.socket_addr,
+                                                        &proximity_packet,
                                                         &receiver.secret,
                                                     );
                                                 }
@@ -541,8 +603,8 @@ fn should_receive_proximity(
 #[cfg(test)]
 mod tests {
     use super::{
-        discovery_ping_response, group_sound_packet, receiver_accepts_audio, should_receive_proximity,
-        should_route_proximity, use_location_audio,
+        discovery_ping_response, group_sound_packet, receiver_accepts_audio,
+        should_receive_proximity, should_route_proximity, use_location_audio,
     };
     use crate::net::voice_packets::MicPacket;
     use crate::state::{Group, GroupType};
@@ -599,7 +661,10 @@ mod tests {
         let mut request = vec![24];
         request.extend_from_slice(Uuid::from_u128(42).as_bytes());
         request.extend_from_slice(&123456789_i64.to_be_bytes());
-        assert_eq!(discovery_ping_response(&request), Some(request[1..].to_vec()));
+        assert_eq!(
+            discovery_ping_response(&request),
+            Some(request[1..].to_vec())
+        );
         assert!(discovery_ping_response(&request[..24]).is_none());
         request.push(0);
         assert!(discovery_ping_response(&request).is_none());

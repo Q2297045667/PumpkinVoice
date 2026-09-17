@@ -42,11 +42,6 @@ impl CommandHandler for LeaveCommandExecutor {
             return Ok(1);
         }
 
-        if !crate::config::CONFIG.read().unwrap().enable_groups {
-            sender.send_message(crate::i18n::tr(&locale, "command.groups_disabled"));
-            return Ok(1);
-        }
-
         if self
             .state_manager
             .get_player_sync(&player_uuid)

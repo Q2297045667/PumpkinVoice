@@ -421,8 +421,7 @@ mod tests {
 
     #[test]
     fn runtime_folder_scanner_accepts_a_new_locale_without_registration() {
-        let root = std::env::temp_dir()
-            .join(format!("i18n-runtime-test-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("i18n-runtime-test-{}", uuid::Uuid::new_v4()));
         let lang_dir = root.join("lang");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&lang_dir).expect("test lang directory should be created");

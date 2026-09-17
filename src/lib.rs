@@ -6,13 +6,16 @@ pub mod net;
 pub mod state;
 pub mod util;
 
-use crate::handlers::{CustomPayloadHandler, JoinHandler, LeaveHandler};
+use crate::handlers::{CustomPayloadHandler, JoinHandler, LeaveHandler, VisibilityHandler};
 use crate::net::UdpServer;
 use crate::net::custom_payloads::PLUGIN_MESSAGE_PORT;
 use crate::state::StateManager;
 use pumpkin_plugin_api::{
     Context, Plugin, PluginMetadata,
-    events::{EventPriority, PlayerCustomPayloadEvent, PlayerJoinEvent, PlayerLeaveEvent},
+    events::{
+        EventPriority, PlayerCustomPayloadEvent, PlayerHideEntityEvent, PlayerJoinEvent,
+        PlayerLeaveEvent, PlayerShowEntityEvent,
+    },
     permissions, register_plugin,
     scheduler::SchedulerExt,
 };
@@ -56,7 +59,7 @@ impl Plugin for VoiceChatPlugin {
 
     fn on_load(&self, context: Context) -> pumpkin_plugin_api::Result<()> {
         // Initialize config before registration-time strings are resolved.
-        crate::config::VoicechatConfig::init(&context.get_data_folder());
+        crate::config::VoicechatConfig::init(&context.get_data_folder())?;
 
         // Load translations from the embedded registry and data-folder
         // overrides, then use the configured server language below.
@@ -128,6 +131,22 @@ impl Plugin for VoiceChatPlugin {
             true,
         )?;
 
+        context.register_event_handler::<PlayerHideEntityEvent, _>(
+            VisibilityHandler {
+                state_manager: state_manager.clone(),
+            },
+            EventPriority::Normal,
+            true,
+        )?;
+
+        context.register_event_handler::<PlayerShowEntityEvent, _>(
+            VisibilityHandler {
+                state_manager: state_manager.clone(),
+            },
+            EventPriority::Normal,
+            true,
+        )?;
+
         // Initialize UDP Server
         let port = if config.port == -1 {
             PLUGIN_MESSAGE_PORT as u16
@@ -141,7 +160,10 @@ impl Plugin for VoiceChatPlugin {
             &config.bind_address
         };
 
-        let server_addr = format!("{}:{}", bind_address, port);
+        let server_addr = match bind_address.parse::<std::net::IpAddr>() {
+            Ok(ip) => std::net::SocketAddr::new(ip, port).to_string(),
+            Err(_) => format!("{bind_address}:{port}"),
+        };
 
         match UdpServer::new(state_manager.clone(), &server_addr) {
             Ok(udp) => {
@@ -175,16 +197,19 @@ impl Plugin for VoiceChatPlugin {
                 );
             }
             Err(e) => {
-                tracing::error!(
-                    "{}",
-                    crate::i18n::translate_str_with(
-                        locale,
-                        "log.udp.start_failed",
-                        &[e.to_string()],
-                    )
-                );
+                return Err(crate::i18n::translate_str_with(
+                    locale,
+                    "log.udp.start_failed",
+                    &[e.to_string()],
+                ));
             }
         }
+
+        let visibility = crate::handlers::visibility::VisibilityTracker::default();
+        let visibility_state = state_manager.clone();
+        context.schedule_repeating_task(20, 20, move |server| {
+            visibility.reconcile(&server, &visibility_state);
+        });
 
         // Register commands
         context.register_command(

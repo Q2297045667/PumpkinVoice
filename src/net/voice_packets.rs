@@ -259,7 +259,12 @@ impl ConnectionCheckAckPacket {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthenticatePacket, LocationSoundPacket, MicPacket, PingPacket, VoicePacket};
+    use super::{
+        AuthenticateAckPacket, AuthenticatePacket, ConnectionCheckAckPacket, ConnectionCheckPacket,
+        GroupSoundPacket, KeepAlivePacket, LocationSoundPacket, MAX_OPUS_PAYLOAD_SIZE, MicPacket,
+        PingPacket, PlayerSoundPacket, VoicePacket,
+    };
+    use crate::state::Secret;
     use crate::util::buf_ext::BufExt;
     use bytes::Buf;
     use uuid::Uuid;
@@ -312,5 +317,159 @@ mod tests {
         assert!(packet.whispering);
         mic.push(0);
         assert!(MicPacket::from_bytes(&mic).is_none());
+    }
+
+    #[test]
+    fn microphone_packets_accept_opus_boundaries_and_reject_oversized_frames() {
+        for length in [0, 1, 127, 128, MAX_OPUS_PAYLOAD_SIZE] {
+            for whispering in [false, true] {
+                let packet = MicPacket {
+                    data: vec![0xab; length],
+                    sequence_number: i64::MAX,
+                    whispering,
+                };
+                let mut bytes = Vec::new();
+                packet.to_bytes(&mut bytes);
+                let parsed = MicPacket::from_bytes(&bytes).expect("valid Opus payload length");
+                assert_eq!(parsed.data, packet.data);
+                assert_eq!(parsed.sequence_number, i64::MAX);
+                assert_eq!(parsed.whispering, whispering);
+                for end in 0..bytes.len() {
+                    assert!(MicPacket::from_bytes(&bytes[..end]).is_none());
+                }
+            }
+        }
+
+        let mut oversized = Vec::new();
+        MicPacket {
+            data: vec![0; MAX_OPUS_PAYLOAD_SIZE + 1],
+            sequence_number: 0,
+            whispering: false,
+        }
+        .to_bytes(&mut oversized);
+        assert!(MicPacket::from_bytes(&oversized).is_none());
+        assert!(MicPacket::from_bytes(&[0xff, 0xff, 0xff, 0xff, 0x0f]).is_none());
+        assert!(MicPacket::from_bytes(&[0x80; 6]).is_none());
+    }
+
+    #[test]
+    fn player_sound_flags_match_all_official_whisper_and_category_combinations() {
+        let channel_id = Uuid::from_u128(1);
+        let sender = Uuid::from_u128(2);
+        for whispering in [false, true] {
+            for category in [None, Some("music".to_string())] {
+                let packet = PlayerSoundPacket {
+                    channel_id,
+                    sender,
+                    data: vec![0x42],
+                    sequence_number: -2,
+                    distance: 8.0,
+                    whispering,
+                    category: category.clone(),
+                };
+                let mut bytes = Vec::new();
+                packet.to_bytes(&mut bytes);
+                let mut expected = channel_id.as_bytes().to_vec();
+                expected.extend_from_slice(sender.as_bytes());
+                expected.extend_from_slice(&[1, 0x42]);
+                expected.extend_from_slice(&(-2_i64).to_be_bytes());
+                expected.extend_from_slice(&8.0_f32.to_be_bytes());
+                // Official SoundPacket.WHISPER_MASK=1, HAS_CATEGORY_MASK=2.
+                expected.push(u8::from(whispering) | (u8::from(category.is_some()) << 1));
+                if category.is_some() {
+                    expected.extend_from_slice(b"\x05music");
+                }
+                assert_eq!(bytes, expected);
+                assert_eq!(VoicePacket::PlayerSound(packet).get_type_id(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn group_sound_uses_category_bit_without_a_whisper_or_distance_field() {
+        let sender = Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
+        for category in [None, Some("group".to_string())] {
+            let packet = GroupSoundPacket {
+                channel_id: sender,
+                sender,
+                data: Vec::new(),
+                sequence_number: 1,
+                category: category.clone(),
+            };
+            let mut bytes = Vec::new();
+            packet.to_bytes(&mut bytes);
+            let mut expected = sender.as_bytes().repeat(2);
+            expected.push(0); // Empty payload is the official end-of-transmission marker.
+            expected.extend_from_slice(&1_i64.to_be_bytes());
+            expected.push(if category.is_some() { 2 } else { 0 });
+            if category.is_some() {
+                expected.extend_from_slice(b"\x05group");
+            }
+            assert_eq!(bytes, expected);
+            assert_eq!(VoicePacket::GroupSound(packet).get_type_id(), 3);
+        }
+    }
+
+    #[test]
+    fn authentication_and_ping_fields_match_fixed_width_golden_bytes() {
+        let player = Uuid::from_u128(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff);
+        let secret = Secret::from_bytes([0x7a; 16]);
+        let packet = AuthenticatePacket {
+            player_uuid: player,
+            secret,
+        };
+        let mut bytes = Vec::new();
+        packet.to_bytes(&mut bytes);
+        let mut expected = player.as_bytes().to_vec();
+        expected.extend_from_slice(&[0x7a; 16]);
+        assert_eq!(bytes, expected);
+        let parsed = AuthenticatePacket::from_bytes(&expected).unwrap();
+        assert_eq!(parsed.player_uuid, player);
+        assert_eq!(parsed.secret.to_bytes(), [0x7a; 16]);
+        assert_eq!(VoicePacket::Authenticate(Box::new(packet)).get_type_id(), 5);
+
+        let ping = PingPacket {
+            id: player,
+            timestamp: i64::MIN,
+        };
+        let mut bytes = Vec::new();
+        ping.to_bytes(&mut bytes);
+        let mut expected = player.as_bytes().to_vec();
+        expected.extend_from_slice(&i64::MIN.to_be_bytes());
+        assert_eq!(bytes, expected);
+        let parsed = PingPacket::from_bytes(&expected).unwrap();
+        assert_eq!(parsed.id, player);
+        assert_eq!(parsed.timestamp, i64::MIN);
+        assert_eq!(VoicePacket::Ping(ping).get_type_id(), 7);
+    }
+
+    #[test]
+    fn control_packet_ids_and_empty_bodies_match_official_protocol() {
+        let mut bytes = Vec::new();
+        AuthenticateAckPacket.to_bytes(&mut bytes);
+        KeepAlivePacket.to_bytes(&mut bytes);
+        ConnectionCheckPacket.to_bytes(&mut bytes);
+        ConnectionCheckAckPacket.to_bytes(&mut bytes);
+        assert!(bytes.is_empty());
+        for (packet, expected) in [
+            (VoicePacket::AuthenticateAck(AuthenticateAckPacket), 6),
+            (VoicePacket::KeepAlive(KeepAlivePacket), 8),
+            (VoicePacket::ConnectionCheck(ConnectionCheckPacket), 9),
+            (
+                VoicePacket::ConnectionCheckAck(ConnectionCheckAckPacket),
+                10,
+            ),
+        ] {
+            assert_eq!(packet.get_type_id(), expected);
+        }
+        assert_eq!(
+            VoicePacket::Mic(MicPacket {
+                data: Vec::new(),
+                sequence_number: 0,
+                whispering: false
+            })
+            .get_type_id(),
+            1
+        );
     }
 }

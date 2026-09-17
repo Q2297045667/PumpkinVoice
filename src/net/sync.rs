@@ -9,7 +9,7 @@ use crate::net::custom_payloads::{
 };
 use crate::state::{Group, PlayerState, StateManager};
 
-pub fn send_full_sync(player: &Player, state_manager: &StateManager) {
+pub fn send_full_sync(player: &Player, server: &Server, state_manager: &StateManager) {
     let Some(java_player) = player.as_java() else {
         return;
     };
@@ -17,6 +17,11 @@ pub fn send_full_sync(player: &Player, state_manager: &StateManager) {
     // Match Bukkit's compatibility-success order: player states, categories,
     // then groups. All snapshots are created before entering host calls.
     let mut states = state_manager.get_all_players_sync();
+    states.retain(|state| {
+        server
+            .get_player_by_uuid(crate::util::uuid_to_wit_uuid(state.uuid))
+            .is_some_and(|state_owner| player.can_see(state_owner))
+    });
     states.sort_by_key(|state| state.uuid);
     java_player.send_custom_payload(
         STATES_CHANNEL,
@@ -70,14 +75,36 @@ pub fn send_secret(player: &Player, state_manager: &StateManager) -> bool {
 }
 
 pub fn broadcast_player_state(server: &Server, state_manager: &StateManager, state: &PlayerState) {
-    broadcast_payload(
-        server,
+    for receiver in server.get_all_players() {
+        let Some(state_owner) =
+            server.get_player_by_uuid(crate::util::uuid_to_wit_uuid(state.uuid))
+        else {
+            return;
+        };
+        if receiver.can_see(state_owner) {
+            send_player_state(&receiver, state_manager, state);
+        }
+    }
+}
+
+pub fn send_player_state(player: &Player, state_manager: &StateManager, state: &PlayerState) {
+    send_payload_to_compatible(
+        player,
         state_manager,
         STATE_CHANNEL,
         &PlayerStatePacket {
             player_state: state,
         }
         .to_bytes(),
+    );
+}
+
+pub fn send_remove_state(player: &Player, state_manager: &StateManager, player_uuid: Uuid) {
+    send_payload_to_compatible(
+        player,
+        state_manager,
+        REMOVE_STATE_CHANNEL,
+        &RemovePlayerStatePacket { player_uuid }.to_bytes(),
     );
 }
 
@@ -122,12 +149,21 @@ fn add_group_bytes(group: &Group) -> Vec<u8> {
 
 fn broadcast_payload(server: &Server, state_manager: &StateManager, channel: &str, data: &[u8]) {
     for player in server.get_all_players() {
-        let uuid = crate::util::wit_uuid_to_uuid(player.get_id());
-        if !state_manager.is_client_compatible_sync(&uuid, VOICECHAT_COMPATIBILITY_VERSION) {
-            continue;
-        }
-        if let Some(java_player) = player.as_java() {
-            java_player.send_custom_payload(channel, data);
-        }
+        send_payload_to_compatible(&player, state_manager, channel, data);
+    }
+}
+
+fn send_payload_to_compatible(
+    player: &Player,
+    state_manager: &StateManager,
+    channel: &str,
+    data: &[u8],
+) {
+    let uuid = crate::util::wit_uuid_to_uuid(player.get_id());
+    if !state_manager.is_client_compatible_sync(&uuid, VOICECHAT_COMPATIBILITY_VERSION) {
+        return;
+    }
+    if let Some(java_player) = player.as_java() {
+        java_player.send_custom_payload(channel, data);
     }
 }

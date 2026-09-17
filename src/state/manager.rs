@@ -176,8 +176,7 @@ impl StateManager {
         let mut expired = Vec::new();
 
         for state in states.values_mut() {
-            let timed_out = !state.disconnected
-                && state.socket_addr.is_some()
+            let timed_out = state.socket_addr.is_some()
                 && state
                     .last_keep_alive_response
                     .is_none_or(|last_response| now.duration_since(last_response) >= timeout);
@@ -197,6 +196,37 @@ impl StateManager {
 
     pub fn get_all_players_sync(&self) -> Vec<PlayerState> {
         self.states.read().unwrap().values().cloned().collect()
+    }
+
+    pub(crate) fn get_audio_targets_sync(&self, sender: Uuid) -> Vec<super::player::AudioTarget> {
+        // Consistent with group transitions: states -> groups. Both guards drop
+        // before routing invokes reentrant Pumpkin host methods.
+        let states = self.states.read().unwrap();
+        let groups = self.groups.read().unwrap();
+        states
+            .values()
+            .filter(|player| {
+                player.uuid != sender
+                    && !player.disconnected
+                    && !player.disabled
+                    && player.compatibility_version
+                        == Some(crate::net::custom_payloads::VOICECHAT_COMPATIBILITY_VERSION)
+            })
+            .filter_map(|player| {
+                player
+                    .socket_addr
+                    .map(|socket_addr| super::player::AudioTarget {
+                        uuid: player.uuid,
+                        group: player.group,
+                        group_type: player
+                            .group
+                            .and_then(|id| groups.get(&id))
+                            .map(|group| group.group_type),
+                        socket_addr,
+                        secret: player.secret.clone(),
+                    })
+            })
+            .collect()
     }
 
     pub fn get_keep_alive_targets_sync(&self) -> Vec<(std::net::SocketAddr, Secret)> {
@@ -383,6 +413,102 @@ mod tests {
     use crate::config::{CategoryConfig, VoicechatConfig};
     use crate::state::{Group, GroupType};
     use uuid::Uuid;
+
+    #[test]
+    fn audio_targets_include_only_other_eligible_connections() {
+        let manager = StateManager::new();
+        let addr = "127.0.0.1:24454".parse().unwrap();
+        for id in 1..=7 {
+            let id = Uuid::from_u128(id);
+            manager.add_player_sync(id, "listener".into());
+            manager.set_client_compatibility_sync(&id, 20);
+            manager.authenticate_voice_sync(&id, addr);
+            manager.mark_voice_connected_sync(&id, addr);
+        }
+        {
+            let mut states = manager.states.write().unwrap();
+            states.get_mut(&Uuid::from_u128(3)).unwrap().disabled = true;
+            states.get_mut(&Uuid::from_u128(4)).unwrap().disconnected = true;
+            states.get_mut(&Uuid::from_u128(5)).unwrap().socket_addr = None;
+            states
+                .get_mut(&Uuid::from_u128(6))
+                .unwrap()
+                .compatibility_version = None;
+            states
+                .get_mut(&Uuid::from_u128(7))
+                .unwrap()
+                .compatibility_version = Some(19);
+        }
+        let targets = manager.get_audio_targets_sync(Uuid::from_u128(1));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].uuid, Uuid::from_u128(2));
+        assert_eq!(targets[0].socket_addr, addr);
+        assert_eq!(targets[0].group_type, None);
+        assert_eq!(
+            targets[0].secret.uuid,
+            manager
+                .get_player_sync(&targets[0].uuid)
+                .unwrap()
+                .secret
+                .uuid
+        );
+        // Fresh snapshots cannot send to a timed-out connection or stale session key.
+        manager.expire_voice_connections_sync(std::time::Duration::ZERO);
+        assert!(
+            manager
+                .get_audio_targets_sync(Uuid::from_u128(1))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn audio_target_snapshot_tracks_group_transitions_without_holding_locks() {
+        let manager = StateManager::new();
+        let player = Uuid::from_u128(2);
+        let addr = "127.0.0.1:24454".parse().unwrap();
+        manager.add_player_sync(player, "listener".into());
+        manager.set_client_compatibility_sync(&player, 20);
+        manager.authenticate_voice_sync(&player, addr);
+        manager.mark_voice_connected_sync(&player, addr);
+        let mut isolated = group("isolated", None, false);
+        isolated.group_type = GroupType::Isolated;
+        manager.create_group_for_player_sync(&player, isolated.clone());
+        let targets = manager.get_audio_targets_sync(Uuid::nil());
+        assert_eq!(targets[0].group, Some(isolated.id));
+        assert_eq!(targets[0].group_type, Some(GroupType::Isolated));
+        manager.leave_group_sync(&player);
+        assert_eq!(
+            manager.get_audio_targets_sync(Uuid::nil())[0].group_type,
+            None
+        );
+        assert_eq!(targets[0].group_type, Some(GroupType::Isolated));
+    }
+
+    #[test]
+    fn pending_authentication_expires_and_rotates_its_secret() {
+        let manager = StateManager::new();
+        let player = Uuid::new_v4();
+        let old_secret = manager.add_player_sync(player, "pending".into()).uuid;
+        manager.authenticate_voice_sync(&player, "127.0.0.1:24454".parse().unwrap());
+        manager
+            .states
+            .write()
+            .unwrap()
+            .get_mut(&player)
+            .unwrap()
+            .last_keep_alive_response =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(20));
+        let expired = manager.expire_voice_connections_sync(std::time::Duration::from_secs(10));
+        assert_eq!(expired.len(), 1);
+        assert!(expired[0].socket_addr.is_none());
+        assert!(expired[0].disconnected);
+        assert_ne!(expired[0].secret.uuid, old_secret);
+        assert!(
+            manager
+                .expire_voice_connections_sync(std::time::Duration::ZERO)
+                .is_empty()
+        );
+    }
 
     fn group(name: &str, password: Option<&str>, persistent: bool) -> Group {
         Group {
@@ -579,5 +705,209 @@ mod tests {
             .expect("second player should exist");
         assert_eq!(second_leave.removed_groups, vec![shared.id]);
         assert!(manager.get_group_sync(&shared.id).is_none());
+    }
+
+    #[test]
+    fn failed_group_operations_preserve_membership_and_registry() {
+        let manager = StateManager::new();
+        let player = Uuid::new_v4();
+        let missing_player = Uuid::new_v4();
+        manager.add_player_sync(player, "Member".into());
+        let current = group("Current", None, false);
+        manager
+            .create_group_for_player_sync(&player, current.clone())
+            .unwrap();
+        let protected = group("Protected", Some("exact password"), false);
+        manager.add_group_sync(protected.clone());
+
+        for password in [None, Some("wrong"), Some("Exact password")] {
+            assert_eq!(
+                manager.join_group_sync(&player, &protected.id, password),
+                JoinGroupResult::WrongPassword
+            );
+            assert_eq!(
+                manager.get_player_sync(&player).unwrap().group,
+                Some(current.id)
+            );
+        }
+        assert_eq!(
+            manager.join_group_sync(&player, &Uuid::new_v4(), None),
+            JoinGroupResult::GroupNotFound
+        );
+        assert_eq!(
+            manager.join_group_sync(&missing_player, &protected.id, Some("exact password")),
+            JoinGroupResult::PlayerNotFound
+        );
+        let uncreated = group("Not created", None, false);
+        assert!(
+            manager
+                .create_group_for_player_sync(&missing_player, uncreated.clone())
+                .is_none()
+        );
+        assert!(manager.get_group_sync(&uncreated.id).is_none());
+        assert!(manager.leave_group_sync(&missing_player).is_none());
+        assert_eq!(
+            manager.get_player_sync(&player).unwrap().group,
+            Some(current.id)
+        );
+        assert_eq!(manager.get_all_groups_sync().len(), 2);
+
+        let JoinGroupResult::Joined(transition) =
+            manager.join_group_sync(&player, &protected.id, Some("exact password"))
+        else {
+            panic!("exact password should join");
+        };
+        assert_eq!(transition.previous_group, Some(current.id));
+        assert_eq!(transition.group, Some(protected.clone()));
+        assert!(transition.removed_groups.is_empty());
+        assert_eq!(
+            manager.get_player_sync(&player).unwrap().group,
+            Some(protected.id)
+        );
+    }
+
+    #[test]
+    fn voice_connection_requires_authenticated_address_and_completed_check() {
+        let manager = StateManager::new();
+        let player = Uuid::new_v4();
+        let unknown = Uuid::new_v4();
+        let first = "127.0.0.1:30000".parse().unwrap();
+        let second = "127.0.0.1:30001".parse().unwrap();
+        manager.add_player_sync(player, "Player".into());
+
+        assert!(manager.mark_voice_connected_sync(&player, first).is_none());
+        assert!(!manager.record_keep_alive_sync(&player, first));
+        manager.authenticate_voice_sync(&player, first);
+        assert!(manager.mark_voice_connected_sync(&player, second).is_none());
+        assert!(!manager.record_keep_alive_sync(&player, first));
+        assert!(manager.get_keep_alive_targets_sync().is_empty());
+        let connected = manager.mark_voice_connected_sync(&player, first).unwrap();
+        assert!(!connected.disconnected);
+        assert!(manager.record_keep_alive_sync(&player, first));
+        assert!(!manager.record_keep_alive_sync(&player, second));
+        let targets = manager.get_keep_alive_targets_sync();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, first);
+        assert_eq!(targets[0].1.uuid, connected.secret.uuid);
+
+        // A renewed authenticated endpoint supersedes the previous NAT mapping.
+        manager.authenticate_voice_sync(&player, second);
+        assert!(!manager.record_keep_alive_sync(&player, first));
+        assert!(manager.mark_voice_connected_sync(&player, first).is_none());
+        assert!(manager.mark_voice_connected_sync(&player, second).is_some());
+        assert!(manager.record_keep_alive_sync(&player, second));
+
+        manager.authenticate_voice_sync(&unknown, first);
+        assert!(manager.get_player_sync(&unknown).is_none());
+        assert!(manager.mark_voice_connected_sync(&unknown, first).is_none());
+        assert!(!manager.record_keep_alive_sync(&unknown, first));
+    }
+
+    #[test]
+    fn disabled_audio_does_not_disconnect_or_erase_group_membership() {
+        let manager = StateManager::new();
+        let player = Uuid::new_v4();
+        manager.add_player_sync(player, "Player".into());
+        let shared = group("Shared", None, false);
+        manager
+            .create_group_for_player_sync(&player, shared.clone())
+            .unwrap();
+        manager.set_client_compatibility_sync(&player, 20);
+        let address = "127.0.0.1:30000".parse().unwrap();
+        manager.authenticate_voice_sync(&player, address);
+        let connected = manager.mark_voice_connected_sync(&player, address).unwrap();
+
+        for disabled in [true, false] {
+            let updated = manager.update_disabled_sync(&player, disabled).unwrap();
+            assert_eq!(updated.disabled, disabled);
+            assert!(!updated.disconnected);
+            assert_eq!(updated.group, Some(shared.id));
+            assert_eq!(updated.socket_addr, Some(address));
+            assert_eq!(updated.secret.uuid, connected.secret.uuid);
+            assert_eq!(updated.compatibility_version, Some(20));
+            assert_eq!(manager.get_keep_alive_targets_sync().len(), 1);
+        }
+        assert!(
+            manager
+                .update_disabled_sync(&Uuid::new_v4(), true)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reconnecting_after_removal_gets_a_fresh_unnegotiated_session() {
+        let manager = StateManager::new();
+        let player = Uuid::new_v4();
+        let secret = manager.add_player_sync(player, "Old name".into());
+        let shared = group("Shared", None, false);
+        manager
+            .create_group_for_player_sync(&player, shared.clone())
+            .unwrap();
+        manager.set_client_compatibility_sync(&player, 20);
+        manager.update_disabled_sync(&player, true);
+        let address = "127.0.0.1:30000".parse().unwrap();
+        manager.authenticate_voice_sync(&player, address);
+        manager.mark_voice_connected_sync(&player, address);
+
+        manager.remove_player_sync(&player);
+        assert!(manager.get_player_sync(&player).is_none());
+        assert!(manager.get_keep_alive_targets_sync().is_empty());
+        assert_eq!(manager.cleanup_empty_groups_sync(), vec![shared.id]);
+        let new_secret = manager.add_player_sync(player, "New name".into());
+        let state = manager.get_player_sync(&player).unwrap();
+        assert_ne!(secret.uuid, new_secret.uuid);
+        assert_eq!(state.name, "New name");
+        assert!(state.disconnected);
+        assert!(!state.disabled);
+        assert_eq!(state.compatibility_version, None);
+        assert_eq!(state.group, None);
+        assert_eq!(state.socket_addr, None);
+        assert_eq!(state.last_keep_alive_response, None);
+    }
+
+    #[test]
+    fn only_stale_connections_expire_and_voice_timeout_preserves_game_state() {
+        let manager = StateManager::new();
+        let stale = Uuid::new_v4();
+        let active = Uuid::new_v4();
+        let unconnected = Uuid::new_v4();
+        for player in [stale, active, unconnected] {
+            manager.add_player_sync(player, "Player".into());
+        }
+        let shared = group("Shared", None, false);
+        manager
+            .create_group_for_player_sync(&stale, shared.clone())
+            .unwrap();
+        manager.set_client_compatibility_sync(&stale, 20);
+        manager.update_disabled_sync(&stale, true);
+        let address = "127.0.0.1:30000".parse().unwrap();
+        for player in [stale, active] {
+            manager.authenticate_voice_sync(&player, address);
+            manager.mark_voice_connected_sync(&player, address);
+        }
+        let stale_secret = manager.get_player_sync(&stale).unwrap().secret.uuid;
+        manager
+            .states
+            .write()
+            .unwrap()
+            .get_mut(&stale)
+            .unwrap()
+            .last_keep_alive_response =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+
+        let expired = manager.expire_voice_connections_sync(std::time::Duration::from_secs(60));
+        assert_eq!(expired.len(), 1);
+        let expired = &expired[0];
+        assert_eq!(expired.uuid, stale);
+        assert!(expired.disconnected);
+        assert!(expired.disabled);
+        assert_eq!(expired.group, Some(shared.id));
+        assert_eq!(expired.compatibility_version, Some(20));
+        assert_eq!(expired.socket_addr, None);
+        assert_eq!(expired.last_keep_alive_response, None);
+        assert_ne!(expired.secret.uuid, stale_secret);
+        assert!(!manager.get_player_sync(&active).unwrap().disconnected);
+        assert_eq!(manager.get_keep_alive_targets_sync().len(), 1);
+        assert!(manager.cleanup_empty_groups_sync().is_empty());
     }
 }

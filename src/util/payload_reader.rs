@@ -65,11 +65,16 @@ impl<'a> PayloadReader<'a> {
     }
 
     pub fn read_byte_array(&mut self, max_length: usize) -> Option<Vec<u8>> {
+        Some(self.read_byte_slice(max_length)?.to_vec())
+    }
+
+    /// Borrow an untrusted length-prefixed payload without allocating a copy.
+    pub fn read_byte_slice(&mut self, max_length: usize) -> Option<&'a [u8]> {
         let byte_length = usize::try_from(self.read_varint()?).ok()?;
         if byte_length > max_length {
             return None;
         }
-        Some(self.take(byte_length)?.to_vec())
+        self.take(byte_length)
     }
 
     #[must_use]
@@ -90,6 +95,24 @@ impl<'a> PayloadReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::PayloadReader;
+
+    #[test]
+    fn byte_slice_borrows_input_and_enforces_bounds() {
+        let input = [3, 10, 20, 30, 99];
+        let mut reader = PayloadReader::new(&input);
+        let payload = reader.read_byte_slice(3).unwrap();
+        assert_eq!(payload, &[10, 20, 30]);
+        assert_eq!(payload.as_ptr(), input[1..].as_ptr());
+        assert_eq!(reader.read_u8(), Some(99));
+        assert!(reader.is_finished());
+        assert!(PayloadReader::new(&input).read_byte_slice(2).is_none());
+        assert!(PayloadReader::new(&[3, 10]).read_byte_slice(3).is_none());
+        assert!(
+            PayloadReader::new(&[0xff, 0xff, 0xff, 0xff, 0x0f])
+                .read_byte_slice(3)
+                .is_none()
+        );
+    }
 
     #[test]
     fn rejects_truncated_and_oversized_values_without_panicking() {

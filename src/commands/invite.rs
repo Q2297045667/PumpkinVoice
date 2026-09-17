@@ -88,19 +88,21 @@ impl CommandHandler for InviteCommandExecutor {
                         }
                         // The invite text is resolved in the *target's* locale.
                         let target_locale = target_player.get_locale();
-                        target_player.send_system_message(
-                            crate::i18n::tr_with(
-                                &target_locale,
-                                "command.invite.message",
-                                vec![
-                                    source_player.get_name(),
-                                    group.name.clone(),
-                                    group.id.to_string(),
-                                    pwd_suffix.clone(),
-                                ],
-                            ),
-                            false,
+                        let invitation = crate::i18n::tr_with(
+                            &target_locale,
+                            "command.invite.message",
+                            vec![
+                                source_player.get_name(),
+                                group.name.clone(),
+                                group.id.to_string(),
+                                pwd_suffix.clone(),
+                            ],
                         );
+                        let invitation = invitation.click_run_command(&format!(
+                            "/voicechat join {}{}",
+                            group.id, pwd_suffix
+                        ));
+                        target_player.send_system_message(invitation, false);
                         invited += 1;
                     }
                     if invited > 0 {

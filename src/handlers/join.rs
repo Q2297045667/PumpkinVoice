@@ -28,7 +28,10 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
         // Mirror Bukkit: Minecraft join creates a disconnected voice state.
         // The client initiates registry/secret synchronization with
         // voicechat:request_secret once its plugin channels are ready.
-        self.state_manager.add_player_sync(uuid, player.get_name());
+        let login_secret = self
+            .state_manager
+            .add_player_sync(uuid, player.get_name())
+            .uuid;
         if let Some(state) = self.state_manager.get_player_sync(&uuid) {
             broadcast_player_state(&server, &self.state_manager, &state);
         }
@@ -36,9 +39,16 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
         let config = crate::config::CONFIG.read().unwrap().clone();
         if config.force_voice_chat {
             let state_manager = self.state_manager.clone();
-            let timeout_ticks = (config.login_timeout / 50).max(0) as u64;
+            let timeout_ticks = (config.login_timeout.max(0) as u64).div_ceil(50);
 
             server.schedule_delayed_task(timeout_ticks, move |server| {
+                // A delayed task from an older login must not kick a new session.
+                if state_manager
+                    .get_player_sync(&uuid)
+                    .is_none_or(|state| state.secret.uuid != login_secret)
+                {
+                    return;
+                }
                 if state_manager.is_client_compatible_sync(&uuid, VOICECHAT_COMPATIBILITY_VERSION) {
                     return;
                 }

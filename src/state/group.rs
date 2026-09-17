@@ -52,7 +52,8 @@ pub struct Group {
 }
 
 /// Matches Simple Voice Chat's `GROUP_REGEX`: 1-24 characters, no Unicode
-/// `Other` (`\p{C}`) characters, and no leading whitespace.
+/// `Other` (`\p{C}`) characters, and no leading ASCII whitespace. Also enforce
+/// the wire format's UTF-16 limit, which is stricter than regex scalar counting.
 #[must_use]
 pub fn is_valid_group_text(value: &str) -> bool {
     let mut chars = value.chars();
@@ -61,8 +62,8 @@ pub fn is_valid_group_text(value: &str) -> bool {
     };
 
     !is_unicode_other(first)
-        && !first.is_whitespace()
-        && chars.clone().count() < MAX_GROUP_NAME_LENGTH
+        && !first.is_ascii_whitespace()
+        && value.encode_utf16().count() <= MAX_GROUP_NAME_LENGTH
         && chars.all(|character| !is_unicode_other(character))
 }
 
@@ -94,8 +95,15 @@ mod tests {
     fn group_text_validation_matches_the_upstream_limits() {
         assert!(is_valid_group_text("Open group"));
         assert!(is_valid_group_text(&"a".repeat(24)));
+        assert!(is_valid_group_text(&"😀".repeat(12)));
+        assert!(!is_valid_group_text(&"😀".repeat(13)));
+        assert!(is_valid_group_text(&format!("{}ab", "😀".repeat(11))));
+        assert!(!is_valid_group_text(&format!("{}a", "😀".repeat(12))));
         assert!(!is_valid_group_text(""));
         assert!(!is_valid_group_text(" leading"));
+        // Java's GROUP_REGEX does not enable UNICODE_CHARACTER_CLASS for \s.
+        assert!(is_valid_group_text("\u{00a0}group"));
+        assert!(is_valid_group_text("\u{3000}group"));
         assert!(!is_valid_group_text("line\nbreak"));
         assert!(!is_valid_group_text("zero\u{200b}width"));
         assert!(!is_valid_group_text("private\u{e000}use"));

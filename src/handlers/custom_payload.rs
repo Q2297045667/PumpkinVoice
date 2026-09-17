@@ -45,7 +45,7 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
 
         match event.channel.as_str() {
             REQUEST_SECRET_CHANNEL => {
-                self.handle_request_secret(player, &event.data);
+                self.handle_request_secret(&server, player, &event.data);
             }
             UPDATE_STATE_CHANNEL if self.client_is_compatible(&uuid) => {
                 self.handle_update_state(&server, uuid, &event.data);
@@ -67,20 +67,14 @@ impl EventHandler<PlayerCustomPayloadEvent> for CustomPayloadHandler {
 }
 
 fn is_voicechat_channel(channel: &str) -> bool {
-    matches!(channel, REQUEST_SECRET_CHANNEL | UPDATE_STATE_CHANNEL | SET_GROUP_CHANNEL | CREATE_GROUP_CHANNEL | LEAVE_GROUP_CHANNEL)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_voicechat_channel;
-
-    #[test]
-    fn tcp_budget_only_applies_to_supported_voicechat_channels() {
-        assert!(is_voicechat_channel("voicechat:request_secret"));
-        assert!(is_voicechat_channel("voicechat:create_group"));
-        assert!(!is_voicechat_channel("minecraft:brand"));
-        assert!(!is_voicechat_channel("another_mod:request_secret"));
-    }
+    matches!(
+        channel,
+        REQUEST_SECRET_CHANNEL
+            | UPDATE_STATE_CHANNEL
+            | SET_GROUP_CHANNEL
+            | CREATE_GROUP_CHANNEL
+            | LEAVE_GROUP_CHANNEL
+    )
 }
 
 impl CustomPayloadHandler {
@@ -89,7 +83,7 @@ impl CustomPayloadHandler {
             .is_client_compatible_sync(uuid, VOICECHAT_COMPATIBILITY_VERSION)
     }
 
-    fn handle_request_secret(&self, player: &Player, data: &[u8]) {
+    fn handle_request_secret(&self, server: &Server, player: &Player, data: &[u8]) {
         let uuid = crate::util::wit_uuid_to_uuid(player.get_id());
         let Some(request) = RequestSecretPacket::from_bytes(data) else {
             self.log_invalid_payload(REQUEST_SECRET_CHANNEL, uuid);
@@ -134,7 +128,7 @@ impl CustomPayloadHandler {
         // Bukkit synchronizes state/category/group registries only after the
         // client proves protocol compatibility. Sending these on PlayerJoin is
         // too early for the client-side plugin channel handlers.
-        send_full_sync(player, &self.state_manager);
+        send_full_sync(player, server, &self.state_manager);
 
         if send_secret(player, &self.state_manager) {
             info!(
@@ -317,5 +311,18 @@ impl CustomPayloadHandler {
                 &[channel.to_string(), uuid.to_string()],
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_voicechat_channel;
+
+    #[test]
+    fn tcp_budget_only_applies_to_supported_voicechat_channels() {
+        assert!(is_voicechat_channel("voicechat:request_secret"));
+        assert!(is_voicechat_channel("voicechat:create_group"));
+        assert!(!is_voicechat_channel("minecraft:brand"));
+        assert!(!is_voicechat_channel("another_mod:request_secret"));
     }
 }

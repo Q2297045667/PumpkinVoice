@@ -1,5 +1,6 @@
 pub mod buf_ext;
 pub mod payload_reader;
+pub mod permission_notice;
 pub mod rate_limiter;
 
 pub fn wit_uuid_to_uuid(id: pumpkin_plugin_api::uuid::Uuid) -> uuid::Uuid {

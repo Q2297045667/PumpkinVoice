@@ -15,3 +15,13 @@ pub struct PlayerState {
     pub socket_addr: Option<std::net::SocketAddr>,
     pub last_keep_alive_response: Option<std::time::Instant>,
 }
+
+/// Minimal, eligible receiver snapshot for one audio frame. No host handles or
+/// locks escape into routing, and names/connection bookkeeping are not cloned.
+pub(crate) struct AudioTarget {
+    pub uuid: Uuid,
+    pub group: Option<Uuid>,
+    pub group_type: Option<super::GroupType>,
+    pub socket_addr: std::net::SocketAddr,
+    pub secret: Secret,
+}

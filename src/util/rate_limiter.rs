@@ -108,7 +108,10 @@ impl RateLimiter {
 
     fn should_log_limit(&mut self) -> bool {
         let now = Instant::now();
-        if self.last_warning.is_some_and(|last| now.duration_since(last) < Duration::from_secs(5)) {
+        if self
+            .last_warning
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(5))
+        {
             return false;
         }
         self.last_warning = Some(now);
