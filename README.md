@@ -18,7 +18,6 @@ This plugin implements the backend compatibility needed to host the [Simple Voic
 
 - **Language**: Rust (edition 2024), compiled to a `wasm32-wasip2` WebAssembly component
 - **Framework**: [`pumpkin-plugin-api`](https://github.com/Pumpkin-MC/Pumpkin) (PumpkinMC Plugin SDK)
-- **Plugin Interface**: the `pumpkin:plugin@0.1.0` WIT world from [`pumpkin-plugin-wit`](https://github.com/Pumpkin-MC/pumpkin-plugin-wit)
 - **Networking**: non-blocking `std::net::UdpSocket` driven by the host scheduler (no async runtime inside the WASI sandbox)
 - **Cryptography**: `aes-gcm` (AES-128-GCM) suite for packet serialization matching JVM mod signatures
 - **Configuration**: `serde` / `toml`
